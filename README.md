@@ -11,7 +11,7 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 3. **Voting power** is used to vote for the project's gauge on Aerodrome
 4. **Rewards** (bribes + fees) are converted to WETH and paired with project tokens
 5. **LP tokens** are permanently locked, generating trading fees forever
-6. **Participants** claim project tokens proportional to their voting power contribution
+6. **Participants** claim project tokens proportional to their voting power contribution and withdraw their locked voting power after epoch ending
 
 ## Architecture
 
@@ -184,7 +184,6 @@ Contracts integrate with Aerodrome on Base:
 ## Security
 
 - Audited: [Pending]
-- Bug bounty: [Pending]
 
 ### Key Security Features
 
@@ -201,7 +200,7 @@ MIT
 
 ## Links
 
-- Website: [Coming Soon]
+- Website: https://www.kickoff.fun/
 - Documentation: [Coming Soon]
 - Aerodrome: https://aerodrome.finance
 
