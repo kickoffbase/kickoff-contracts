@@ -1,0 +1,28 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+broadcast/
+
+# Environment
+.env
+.env.*
+
+# Docs
+docs/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Dependencies (installed via forge install)
+lib/
+
+# Coverage
+lcov.info
+coverage/
+

@@ -1,0 +1,938 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {EpochLib} from "./libraries/EpochLib.sol";
+import {LPLocker} from "./LPLocker.sol";
+import {IVotingEscrow} from "./interfaces/IVotingEscrow.sol";
+import {IVoter} from "./interfaces/IVoter.sol";
+import {IRouter} from "./interfaces/IRouter.sol";
+import {IPool} from "./interfaces/IPool.sol";
+import {IERC20} from "./interfaces/IERC20.sol";
+import {IWETH} from "./interfaces/IWETH.sol";
+import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
+
+/// @title KickoffVoteSalePool
+/// @notice Vote-Sale pool for veAERO holders to participate in project launches
+/// @dev Handles locking veAERO NFTs, voting, claiming rewards, and distributing project tokens
+contract KickoffVoteSalePool is IERC721Receiver {
+    using EpochLib for uint256;
+
+    /*//////////////////////////////////////////////////////////////
+                            REENTRANCY GUARD
+    //////////////////////////////////////////////////////////////*/
+
+    uint256 private constant NOT_ENTERED = 1;
+    uint256 private constant ENTERED = 2;
+    uint256 private _reentrancyStatus = NOT_ENTERED;
+
+    modifier nonReentrant() {
+        if (_reentrancyStatus == ENTERED) revert ReentrancyGuardReentrantCall();
+        _reentrancyStatus = ENTERED;
+        _;
+        _reentrancyStatus = NOT_ENTERED;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 ERRORS
+    //////////////////////////////////////////////////////////////*/
+
+    error NotAdmin();
+    error NotOwner();
+    error ZeroAddress();
+    error InvalidState();
+    error NotNFTOwner();
+    error AlreadyVotedThisEpoch();
+    error NFTNotLocked();
+    error AlreadyClaimed();
+    error NothingToClaim();
+    error TransferFailed();
+    error LockingClosed();
+    error NotProjectToken();
+    error SwapFailed();
+    error BatchInProgress();
+    error NoBatchInProgress();
+    error BatchSizeTooLarge();
+    error ReentrancyGuardReentrantCall();
+    error SlippageExceeded();
+    error InvalidGauge();
+    error GaugeNotActive();
+
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    event VeAEROLocked(address indexed user, uint256 indexed tokenId, uint256 votingPower);
+    event VeAEROUnlocked(address indexed user, uint256 indexed tokenId);
+    event VotesCast(address indexed gauge, uint256 totalVotingPower);
+    event EpochFinalized(uint256 wethCollected, uint256 lpCreated);
+    event ProjectTokensClaimed(address indexed user, uint256 amount);
+    event EmergencyWithdraw(address indexed user, uint256 indexed tokenId);
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
+    event StateChanged(PoolState previousState, PoolState newState);
+    event BatchProgress(string operation, uint256 processed, uint256 total);
+
+    /*//////////////////////////////////////////////////////////////
+                                 ENUMS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Pool states
+    enum PoolState {
+        Inactive, // Pool created, waiting for activation
+        Active, // Accepting veAERO locks
+        Voting, // Voting period
+        Finalizing, // Claiming rewards and creating LP
+        Completed // All done, claims open
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 STRUCTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Info about a locked veAERO NFT
+    struct LockedNFT {
+        address owner;
+        uint256 votingPower;
+        bool unlocked;
+    }
+
+    /// @notice User participation info
+    struct UserInfo {
+        uint256 totalVotingPower;
+        bool claimed;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 STATE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Admin address (pool creator, receives 20% trading fees)
+    address public immutable admin;
+
+    /// @notice Project owner address (receives 80% trading fees)
+    address public immutable projectOwner;
+
+    /// @notice Project token address
+    address public immutable projectToken;
+
+    /// @notice Total allocation of project tokens (50% sale, 50% liquidity)
+    uint256 public immutable totalAllocation;
+
+    /// @notice Sale allocation (50% of total, for participants)
+    uint256 public immutable saleAllocation;
+
+    /// @notice Liquidity allocation (50% of total, for LP creation)
+    uint256 public immutable liquidityAllocation;
+
+    /// @notice LP Locker contract
+    LPLocker public immutable lpLocker;
+
+    /// @notice Aerodrome VotingEscrow contract
+    IVotingEscrow public immutable votingEscrow;
+
+    /// @notice Aerodrome Voter contract
+    IVoter public immutable voter;
+
+    /// @notice Aerodrome Router contract
+    IRouter public immutable router;
+
+    /// @notice WETH contract
+    IWETH public immutable weth;
+
+    /// @notice Protocol owner (for emergency functions)
+    address public owner;
+
+    /// @notice Pending owner for two-step transfer
+    address public pendingOwner;
+
+    /// @notice Current pool state
+    PoolState public state;
+
+    /// @notice Gauge address (set during castVotes)
+    address public gauge;
+
+    /// @notice Aerodrome pool for the LP
+    address public aerodromePool;
+
+    /// @notice LP token address
+    address public lpToken;
+
+    /// @notice Epoch when the pool was activated
+    uint256 public activeEpoch;
+
+    /// @notice Total voting power locked
+    uint256 public totalVotingPower;
+
+    /// @notice Total WETH collected from bribes/fees
+    uint256 public wethCollected;
+
+    /// @notice Total LP created
+    uint256 public lpCreated;
+
+    /// @notice Mapping of tokenId to locked NFT info
+    mapping(uint256 => LockedNFT) public lockedNFTs;
+
+    /// @notice Array of all locked token IDs
+    uint256[] public lockedTokenIds;
+
+    /// @notice Mapping of user address to their info
+    mapping(address => UserInfo) public userInfo;
+
+    /*//////////////////////////////////////////////////////////////
+                           BATCH PROCESSING
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Maximum NFTs to process per batch (gas optimization)
+    uint256 public constant MAX_BATCH_SIZE = 50;
+
+    /// @notice Index of last processed NFT in current batch operation
+    uint256 public batchIndex;
+
+    /// @notice Whether a batch operation is in progress
+    bool public batchInProgress;
+
+    /// @notice Bribe tokens for batch claim (stored between batches)
+    address[] private _batchBribeTokens;
+
+    /*//////////////////////////////////////////////////////////////
+                          SLIPPAGE PROTECTION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Default slippage tolerance in basis points (5% = 500)
+    uint256 public constant DEFAULT_SLIPPAGE_BPS = 500;
+
+    /// @notice Basis points denominator
+    uint256 public constant BPS_DENOMINATOR = 10000;
+
+    /// @notice Slippage tolerance for swaps (in basis points)
+    uint256 public swapSlippageBps = DEFAULT_SLIPPAGE_BPS;
+
+    /// @notice Slippage tolerance for adding liquidity (in basis points)
+    uint256 public liquiditySlippageBps = DEFAULT_SLIPPAGE_BPS;
+
+    /*//////////////////////////////////////////////////////////////
+                              MODIFIERS
+    //////////////////////////////////////////////////////////////*/
+
+    modifier onlyAdmin() {
+        if (msg.sender != admin) revert NotAdmin();
+        _;
+    }
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier inState(PoolState _state) {
+        if (state != _state) revert InvalidState();
+        _;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Create a new Vote-Sale pool
+    constructor(
+        address _projectToken,
+        address _admin,
+        address _projectOwner,
+        uint256 _totalAllocation,
+        address _lpLocker,
+        address _votingEscrow,
+        address _voter,
+        address _router,
+        address _weth
+    ) {
+        projectToken = _projectToken;
+        admin = _admin;
+        projectOwner = _projectOwner;
+        totalAllocation = _totalAllocation;
+        saleAllocation = _totalAllocation / 2;
+        liquidityAllocation = _totalAllocation - saleAllocation;
+
+        lpLocker = LPLocker(_lpLocker);
+        votingEscrow = IVotingEscrow(_votingEscrow);
+        voter = IVoter(_voter);
+        router = IRouter(_router);
+        weth = IWETH(_weth);
+
+        owner = _admin;
+        state = PoolState.Inactive;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ERC721 RECEIVER
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Handle receipt of veAERO NFT
+    function onERC721Received(address, address, uint256, bytes calldata) external pure override returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        PHASE 1: LOCK veAERO
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Activate the pool for the current epoch
+    function activate() external onlyAdmin inState(PoolState.Inactive) {
+        activeEpoch = EpochLib.currentEpoch();
+        _setState(PoolState.Active);
+    }
+
+    /// @notice Lock a veAERO NFT to participate in the vote-sale
+    /// @param tokenId The veAERO NFT token ID
+    function lockVeAERO(uint256 tokenId) external nonReentrant inState(PoolState.Active) {
+        // Check ownership
+        if (votingEscrow.ownerOf(tokenId) != msg.sender) {
+            revert NotNFTOwner();
+        }
+
+        // Check if NFT hasn't voted this epoch
+        uint256 lastVoted = voter.lastVoted(tokenId);
+        if (EpochLib.hasVotedThisEpoch(lastVoted)) {
+            revert AlreadyVotedThisEpoch();
+        }
+
+        // Get voting power
+        uint256 votingPowerAmount = votingEscrow.balanceOfNFT(tokenId);
+
+        // Transfer NFT to this contract
+        votingEscrow.safeTransferFrom(msg.sender, address(this), tokenId);
+
+        // Store locked NFT info
+        lockedNFTs[tokenId] = LockedNFT({owner: msg.sender, votingPower: votingPowerAmount, unlocked: false});
+
+        lockedTokenIds.push(tokenId);
+
+        // Update user info
+        userInfo[msg.sender].totalVotingPower += votingPowerAmount;
+
+        // Update total voting power
+        totalVotingPower += votingPowerAmount;
+
+        emit VeAEROLocked(msg.sender, tokenId, votingPowerAmount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        PHASE 2: CAST VOTES (BATCH)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Start or continue casting votes in batches
+    /// @param _gauge The Aerodrome gauge to vote for (only used on first call)
+    /// @param batchSize Number of NFTs to process in this batch (max MAX_BATCH_SIZE)
+    /// @dev Call multiple times until isVotingComplete() returns true
+    function castVotesBatch(address _gauge, uint256 batchSize) external onlyAdmin inState(PoolState.Active) {
+        if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
+        
+        uint256 length = lockedTokenIds.length;
+        if (length == 0) {
+            _setState(PoolState.Voting);
+            emit VotesCast(_gauge, 0);
+            return;
+        }
+
+        // First batch - initialize
+        if (!batchInProgress) {
+            if (_gauge == address(0)) revert ZeroAddress();
+            
+            // Validate gauge
+            address pool = voter.poolForGauge(_gauge);
+            if (pool == address(0)) revert InvalidGauge();
+            if (!voter.isAlive(_gauge)) revert GaugeNotActive();
+            
+            gauge = _gauge;
+            aerodromePool = pool;
+            batchIndex = 0;
+            batchInProgress = true;
+        }
+
+        // Calculate end index
+        uint256 endIndex = batchIndex + batchSize;
+        if (endIndex > length) endIndex = length;
+
+        // Prepare vote arrays
+        address[] memory pools = new address[](1);
+        uint256[] memory weights = new uint256[](1);
+        pools[0] = aerodromePool;
+        weights[0] = 1;
+
+        // Vote with NFTs in this batch
+        for (uint256 i = batchIndex; i < endIndex;) {
+            voter.vote(lockedTokenIds[i], pools, weights);
+            unchecked { ++i; }
+        }
+
+        batchIndex = endIndex;
+        emit BatchProgress("castVotes", batchIndex, length);
+
+        // Check if complete
+        if (batchIndex >= length) {
+            batchInProgress = false;
+            batchIndex = 0;
+            _setState(PoolState.Voting);
+            emit VotesCast(gauge, totalVotingPower);
+        }
+    }
+
+    /// @notice Cast all votes in one transaction (for small number of NFTs)
+    /// @param _gauge The Aerodrome gauge to vote for
+    /// @dev Use castVotesBatch for large numbers of NFTs
+    function castVotes(address _gauge) external onlyAdmin inState(PoolState.Active) {
+        if (batchInProgress) revert BatchInProgress();
+        if (_gauge == address(0)) revert ZeroAddress();
+
+        // Validate gauge
+        address pool = voter.poolForGauge(_gauge);
+        if (pool == address(0)) revert InvalidGauge();
+        if (!voter.isAlive(_gauge)) revert GaugeNotActive();
+
+        gauge = _gauge;
+        aerodromePool = pool;
+
+        address[] memory pools = new address[](1);
+        uint256[] memory weights = new uint256[](1);
+        pools[0] = aerodromePool;
+        weights[0] = 1;
+
+        uint256 length = lockedTokenIds.length;
+        for (uint256 i = 0; i < length;) {
+            voter.vote(lockedTokenIds[i], pools, weights);
+            unchecked { ++i; }
+        }
+
+        _setState(PoolState.Voting);
+        emit VotesCast(_gauge, totalVotingPower);
+    }
+
+    /// @notice Check voting batch progress
+    /// @return processed Number of NFTs processed
+    /// @return total Total number of NFTs
+    /// @return inProgress Whether batch is in progress
+    function getVotingProgress() external view returns (uint256 processed, uint256 total, bool inProgress) {
+        return (batchIndex, lockedTokenIds.length, batchInProgress);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    PHASE 3-5: FINALIZE EPOCH (BATCH)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Finalize step enum for batch processing
+    enum FinalizeStep {
+        NotStarted,
+        ClaimingRewards,
+        ConvertingToWETH,
+        AddingLiquidity,
+        Completed
+    }
+
+    /// @notice Current finalize step
+    FinalizeStep public finalizeStep;
+
+    /// @notice Start claiming rewards in batches
+    /// @param bribeTokens Array of bribe token addresses to claim
+    /// @param batchSize Number of NFTs to process
+    function startClaimRewardsBatch(address[] calldata bribeTokens, uint256 batchSize) 
+        external 
+        onlyAdmin 
+        inState(PoolState.Voting) 
+    {
+        if (batchInProgress) revert BatchInProgress();
+        
+        _setState(PoolState.Finalizing);
+        finalizeStep = FinalizeStep.ClaimingRewards;
+        
+        // Store bribe tokens for subsequent batches
+        delete _batchBribeTokens;
+        for (uint256 i = 0; i < bribeTokens.length; i++) {
+            _batchBribeTokens.push(bribeTokens[i]);
+        }
+        
+        batchIndex = 0;
+        batchInProgress = true;
+        
+        _claimRewardsBatchInternal(batchSize);
+    }
+
+    /// @notice Continue claiming rewards batch
+    /// @param batchSize Number of NFTs to process
+    function continueClaimRewardsBatch(uint256 batchSize) external onlyAdmin inState(PoolState.Finalizing) {
+        if (!batchInProgress) revert NoBatchInProgress();
+        if (finalizeStep != FinalizeStep.ClaimingRewards) revert InvalidState();
+        
+        _claimRewardsBatchInternal(batchSize);
+    }
+
+    /// @notice Internal batch claim logic
+    function _claimRewardsBatchInternal(uint256 batchSize) internal {
+        if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
+        
+        uint256 length = lockedTokenIds.length;
+        if (length == 0) {
+            batchInProgress = false;
+            batchIndex = 0;
+            finalizeStep = FinalizeStep.ConvertingToWETH;
+            emit BatchProgress("claimRewards", 0, 0);
+            return;
+        }
+
+        uint256 endIndex = batchIndex + batchSize;
+        if (endIndex > length) endIndex = length;
+
+        address internalBribe = voter.internal_bribes(gauge);
+        address externalBribe = voter.external_bribes(gauge);
+
+        address[] memory bribes = new address[](2);
+        bribes[0] = internalBribe;
+        bribes[1] = externalBribe;
+
+        address[][] memory tokens = new address[][](2);
+        tokens[0] = _batchBribeTokens;
+        tokens[1] = _batchBribeTokens;
+
+        for (uint256 i = batchIndex; i < endIndex;) {
+            uint256 tokenId = lockedTokenIds[i];
+            try voter.claimBribes(bribes, tokens, tokenId) {} catch {}
+            try voter.claimFees(bribes, tokens, tokenId) {} catch {}
+            unchecked { ++i; }
+        }
+
+        batchIndex = endIndex;
+        emit BatchProgress("claimRewards", batchIndex, length);
+
+        if (batchIndex >= length) {
+            batchInProgress = false;
+            batchIndex = 0;
+            finalizeStep = FinalizeStep.ConvertingToWETH;
+        }
+    }
+
+    /// @notice Convert rewards to WETH and complete finalization
+    /// @dev Call after claimRewards batch is complete
+    function completeFinalization() external nonReentrant onlyAdmin inState(PoolState.Finalizing) {
+        if (batchInProgress) revert BatchInProgress();
+        if (finalizeStep != FinalizeStep.ConvertingToWETH) revert InvalidState();
+
+        // Convert all tokens to WETH
+        _convertToWETH(_batchBribeTokens);
+
+        // Add liquidity
+        _addLiquidity();
+
+        // Lock LP
+        _lockLP();
+
+        // Cleanup
+        delete _batchBribeTokens;
+        finalizeStep = FinalizeStep.Completed;
+        
+        _setState(PoolState.Completed);
+        emit EpochFinalized(wethCollected, lpCreated);
+    }
+
+    /// @notice Finalize the epoch in one transaction (for small number of NFTs)
+    /// @param bribeTokens Array of bribe token addresses to claim and convert
+    /// @dev Use batch functions for large numbers of NFTs
+    function finalizeEpoch(address[] calldata bribeTokens) external nonReentrant onlyAdmin inState(PoolState.Voting) {
+        if (batchInProgress) revert BatchInProgress();
+        
+        _setState(PoolState.Finalizing);
+
+        // Claim rewards (non-batch)
+        _claimRewardsAll(bribeTokens);
+
+        // Convert to WETH
+        _convertToWETH(bribeTokens);
+
+        // Add liquidity
+        _addLiquidity();
+
+        // Lock LP
+        _lockLP();
+
+        _setState(PoolState.Completed);
+        emit EpochFinalized(wethCollected, lpCreated);
+    }
+
+    /// @notice Claim all rewards in one transaction
+    function _claimRewardsAll(address[] calldata bribeTokens) internal {
+        address internalBribe = voter.internal_bribes(gauge);
+        address externalBribe = voter.external_bribes(gauge);
+
+        address[] memory bribes = new address[](2);
+        bribes[0] = internalBribe;
+        bribes[1] = externalBribe;
+
+        address[][] memory tokens = new address[][](2);
+        tokens[0] = bribeTokens;
+        tokens[1] = bribeTokens;
+
+        uint256 length = lockedTokenIds.length;
+        for (uint256 i = 0; i < length;) {
+            uint256 tokenId = lockedTokenIds[i];
+            try voter.claimBribes(bribes, tokens, tokenId) {} catch {}
+            try voter.claimFees(bribes, tokens, tokenId) {} catch {}
+            unchecked { ++i; }
+        }
+    }
+
+    /// @notice Get finalize progress
+    function getFinalizeProgress() external view returns (
+        FinalizeStep step,
+        uint256 claimProgress,
+        uint256 totalNFTs,
+        bool inProgress
+    ) {
+        return (finalizeStep, batchIndex, lockedTokenIds.length, batchInProgress);
+    }
+
+    /// @notice Convert bribe tokens to WETH (calldata version)
+    function _convertToWETH(address[] calldata bribeTokens) internal {
+        _convertToWETHInternal(bribeTokens);
+    }
+
+    /// @notice Convert bribe tokens to WETH (storage version for batch)
+    function _convertToWETH(address[] storage bribeTokens) internal {
+        _convertToWETHInternal(bribeTokens);
+    }
+
+    /// @notice Internal convert logic with slippage protection
+    function _convertToWETHInternal(address[] memory bribeTokens) internal {
+        address routerAddr = address(router);
+        address wethAddr = address(weth);
+        address defaultFactory = router.defaultFactory();
+
+        uint256 length = bribeTokens.length;
+        for (uint256 i = 0; i < length;) {
+            address token = bribeTokens[i];
+
+            // Skip WETH
+            if (token == wethAddr) {
+                unchecked { ++i; }
+                continue;
+            }
+
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance > 0) {
+                // Approve router
+                IERC20(token).approve(routerAddr, balance);
+
+                // Try to swap to WETH with slippage protection
+                IRouter.Route[] memory routes = new IRouter.Route[](1);
+                routes[0] = IRouter.Route({
+                    from: token,
+                    to: wethAddr,
+                    stable: false,
+                    factory: defaultFactory
+                });
+
+                // Get expected output amount for slippage calculation
+                uint256 minOut = _getMinOutputWithSlippage(balance, routes);
+
+                try router.swapExactTokensForTokens(balance, minOut, routes, address(this), block.timestamp) {}
+                catch {
+                    // Try stable route with slippage
+                    routes[0].stable = true;
+                    minOut = _getMinOutputWithSlippage(balance, routes);
+                    try router.swapExactTokensForTokens(balance, minOut, routes, address(this), block.timestamp) {}
+                    catch {
+                        // Token stays on contract for manual rescue
+                    }
+                }
+            }
+
+            unchecked { ++i; }
+        }
+
+        wethCollected = weth.balanceOf(address(this));
+    }
+
+    /// @notice Calculate minimum output with slippage tolerance
+    /// @dev Returns minimum 1 wei to protect against sandwich attacks when quote fails
+    function _getMinOutputWithSlippage(uint256 amountIn, IRouter.Route[] memory routes) internal view returns (uint256) {
+        try router.getAmountsOut(amountIn, routes) returns (uint256[] memory amounts) {
+            if (amounts.length > 1 && amounts[amounts.length - 1] > 0) {
+                // Apply slippage tolerance
+                uint256 minOut = (amounts[amounts.length - 1] * (BPS_DENOMINATOR - swapSlippageBps)) / BPS_DENOMINATOR;
+                return minOut > 0 ? minOut : 1; // Ensure at least 1 wei
+            }
+        } catch {}
+        return 1; // Minimum 1 wei to protect against dust/sandwich attacks
+    }
+
+    /// @notice Add liquidity with WETH and project tokens (with slippage protection)
+    function _addLiquidity() internal {
+        if (wethCollected == 0) return;
+
+        address routerAddr = address(router);
+        address wethAddr = address(weth);
+
+        // Approve tokens
+        IERC20(projectToken).approve(routerAddr, liquidityAllocation);
+        weth.approve(routerAddr, wethCollected);
+
+        // Calculate minimum amounts with slippage tolerance
+        uint256 minProjectToken = (liquidityAllocation * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
+        uint256 minWeth = (wethCollected * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
+
+        // Add liquidity (volatile pool) with slippage protection
+        (,, uint256 liquidity) = router.addLiquidity(
+            projectToken,
+            wethAddr,
+            false, // volatile
+            liquidityAllocation,
+            wethCollected,
+            minProjectToken,
+            minWeth,
+            address(this),
+            block.timestamp
+        );
+
+        lpCreated = liquidity;
+
+        // Get LP token address
+        lpToken = router.poolFor(projectToken, wethAddr, false, router.defaultFactory());
+    }
+
+    /// @notice Lock LP tokens in LPLocker
+    function _lockLP() internal {
+        if (lpCreated == 0) return;
+
+        // Approve LP to locker
+        IERC20(lpToken).approve(address(lpLocker), lpCreated);
+
+        // Lock LP permanently
+        // Note: In Aerodrome, lpToken address IS the pool address (they're the same contract)
+        lpLocker.lockLP(lpToken, lpToken, admin, projectOwner, lpCreated);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                     PHASE 5: UNLOCK & CLAIM
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Unlock a veAERO NFT after epoch completion
+    /// @param tokenId The NFT token ID to unlock
+    function unlockVeAERO(uint256 tokenId) external nonReentrant inState(PoolState.Completed) {
+        LockedNFT storage nft = lockedNFTs[tokenId];
+
+        if (nft.owner != msg.sender) revert NotNFTOwner();
+        if (nft.unlocked) revert NFTNotLocked();
+
+        nft.unlocked = true;
+
+        // Transfer NFT back to owner
+        votingEscrow.safeTransferFrom(address(this), msg.sender, tokenId);
+
+        emit VeAEROUnlocked(msg.sender, tokenId);
+    }
+
+    /// @notice Claim project tokens based on voting power
+    function claimProjectTokens() external nonReentrant inState(PoolState.Completed) {
+        UserInfo storage user = userInfo[msg.sender];
+
+        if (user.claimed) revert AlreadyClaimed();
+        if (user.totalVotingPower == 0) revert NothingToClaim();
+
+        user.claimed = true;
+
+        // Calculate user's share of sale allocation
+        uint256 userShare = (saleAllocation * user.totalVotingPower) / totalVotingPower;
+
+        // Transfer project tokens
+        if (!IERC20(projectToken).transfer(msg.sender, userShare)) {
+            revert TransferFailed();
+        }
+
+        emit ProjectTokensClaimed(msg.sender, userShare);
+    }
+
+    /// @notice Get the amount of project tokens claimable by a user
+    /// @param user The user address
+    /// @return The claimable amount
+    function getClaimableTokens(address user) external view returns (uint256) {
+        UserInfo storage info = userInfo[user];
+
+        if (info.claimed || info.totalVotingPower == 0 || totalVotingPower == 0) {
+            return 0;
+        }
+
+        return (saleAllocation * info.totalVotingPower) / totalVotingPower;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        EMERGENCY FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Emergency withdraw a single NFT
+    /// @param tokenId The NFT token ID
+    function emergencyWithdrawNFT(uint256 tokenId) external onlyOwner {
+        LockedNFT storage nft = lockedNFTs[tokenId];
+
+        if (nft.owner == address(0)) revert NFTNotLocked();
+        if (nft.unlocked) revert NFTNotLocked();
+
+        address nftOwner = nft.owner;
+        nft.unlocked = true;
+
+        // Transfer NFT back to original owner
+        votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
+
+        emit EmergencyWithdraw(nftOwner, tokenId);
+    }
+
+    /// @notice Emergency withdraw all NFTs in one transaction (for small numbers)
+    function emergencyWithdrawAllNFTs() external onlyOwner {
+        if (batchInProgress) revert BatchInProgress();
+        
+        uint256 length = lockedTokenIds.length;
+        for (uint256 i = 0; i < length;) {
+            _emergencyWithdrawSingle(lockedTokenIds[i]);
+            unchecked { ++i; }
+        }
+    }
+
+    /// @notice Emergency withdraw NFTs in batches
+    /// @param batchSize Number of NFTs to process
+    function emergencyWithdrawBatch(uint256 batchSize) external onlyOwner {
+        if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
+        
+        uint256 length = lockedTokenIds.length;
+        if (length == 0) return;
+
+        // Initialize batch if not started
+        if (!batchInProgress) {
+            batchIndex = 0;
+            batchInProgress = true;
+        }
+
+        uint256 endIndex = batchIndex + batchSize;
+        if (endIndex > length) endIndex = length;
+
+        for (uint256 i = batchIndex; i < endIndex;) {
+            _emergencyWithdrawSingle(lockedTokenIds[i]);
+            unchecked { ++i; }
+        }
+
+        batchIndex = endIndex;
+        emit BatchProgress("emergencyWithdraw", batchIndex, length);
+
+        if (batchIndex >= length) {
+            batchInProgress = false;
+            batchIndex = 0;
+        }
+    }
+
+    /// @notice Internal single NFT emergency withdraw
+    function _emergencyWithdrawSingle(uint256 tokenId) internal {
+        LockedNFT storage nft = lockedNFTs[tokenId];
+
+        if (!nft.unlocked && nft.owner != address(0)) {
+            address nftOwner = nft.owner;
+            nft.unlocked = true;
+            votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
+            emit EmergencyWithdraw(nftOwner, tokenId);
+        }
+    }
+
+    /// @notice Get emergency withdraw progress
+    function getEmergencyWithdrawProgress() external view returns (
+        uint256 processed,
+        uint256 total,
+        bool inProgress
+    ) {
+        return (batchIndex, lockedTokenIds.length, batchInProgress);
+    }
+
+    /// @notice Rescue stuck tokens (cannot rescue project tokens)
+    /// @param token The token address
+    /// @param to Recipient address
+    /// @param amount Amount to rescue
+    function rescueTokens(address token, address to, uint256 amount) external onlyAdmin {
+        if (token == projectToken) revert NotProjectToken();
+        if (to == address(0)) revert ZeroAddress();
+
+        if (!IERC20(token).transfer(to, amount)) {
+            revert TransferFailed();
+        }
+
+        emit TokensRescued(token, to, amount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        SLIPPAGE CONFIGURATION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Set swap slippage tolerance
+    /// @param _slippageBps Slippage in basis points (e.g., 500 = 5%)
+    function setSwapSlippage(uint256 _slippageBps) external onlyAdmin {
+        if (_slippageBps > 5000) revert SlippageExceeded(); // Max 50%
+        swapSlippageBps = _slippageBps;
+    }
+
+    /// @notice Set liquidity slippage tolerance
+    /// @param _slippageBps Slippage in basis points (e.g., 500 = 5%)
+    function setLiquiditySlippage(uint256 _slippageBps) external onlyAdmin {
+        if (_slippageBps > 5000) revert SlippageExceeded(); // Max 50%
+        liquiditySlippageBps = _slippageBps;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Get the count of locked NFTs
+    /// @return The count
+    function getLockedNFTCount() external view returns (uint256) {
+        return lockedTokenIds.length;
+    }
+
+    /// @notice Get all locked token IDs
+    /// @return Array of token IDs
+    function getLockedTokenIds() external view returns (uint256[] memory) {
+        return lockedTokenIds;
+    }
+
+    /// @notice Get info about a locked NFT
+    /// @param tokenId The NFT token ID
+    /// @return owner_ The original owner
+    /// @return votingPower_ The voting power
+    /// @return unlocked_ Whether it's been unlocked
+    function getLockedNFTInfo(uint256 tokenId)
+        external
+        view
+        returns (address owner_, uint256 votingPower_, bool unlocked_)
+    {
+        LockedNFT storage nft = lockedNFTs[tokenId];
+        return (nft.owner, nft.votingPower, nft.unlocked);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         OWNER FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Transfer ownership (two-step)
+    /// @param newOwner The new pending owner
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        pendingOwner = newOwner;
+    }
+
+    /// @notice Accept ownership
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotOwner();
+        owner = msg.sender;
+        pendingOwner = address(0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         INTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Update pool state
+    function _setState(PoolState newState) internal {
+        PoolState previousState = state;
+        state = newState;
+        emit StateChanged(previousState, newState);
+    }
+}
+
