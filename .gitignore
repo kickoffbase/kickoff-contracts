@@ -9,9 +9,6 @@ broadcast/
 .env
 .env.*
 
-# Docs
-docs/
-
 # IDE
 .idea/
 .vscode/

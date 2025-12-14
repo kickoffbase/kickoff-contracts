@@ -1,0 +1,38 @@
+Flow,Invariant,Test File,Test Function,Description
+Pool Creation,Single pool per token,test/KickoffFactory.t.sol,test_CreatePool,Verify pool creation and token transfer
+Pool Creation,Single pool per token,test/KickoffFactory.t.sol,test_CreatePool_RevertDuplicate,Reject duplicate pools
+Pool Creation,Zero address check,test/KickoffFactory.t.sol,test_CreatePool_RevertZeroAddress,Revert on zero token/owner
+Pool Creation,Zero amount check,test/KickoffFactory.t.sol,test_CreatePool_RevertZeroAmount,Revert on zero allocation
+Voting,NFT Ownership Conservation,test/KickoffVoteSalePool.t.sol,test_LockVeAERO,Verify NFT locking to pool
+Voting,NFT Ownership Conservation,test/KickoffVoteSalePool.t.sol,test_LockVeAERO_RevertNotOwner,Revert if caller not NFT owner
+Voting,NFT Ownership Conservation,test/KickoffVoteSalePool.t.sol,test_LockVeAERO_RevertAlreadyVoted,Revert if NFT voted in current epoch
+Voting,Voting Power Accounting,test/KickoffVoteSalePool.t.sol,test_VotingPowerAggregation,Verify totalVotingPower = sum of user contributions
+Voting,State Machine Linearity,test/KickoffVoteSalePool.t.sol,test_CastVotes,Verify state transition Active→Voting
+Voting,State Machine Linearity,test/KickoffVoteSalePool.t.sol,test_CastVotes_RevertInvalidState,Revert if casting votes not in Active state
+Voting,Gauge Validation,test/KickoffVoteSalePool.t.sol,test_CastVotes_InvalidGauge,Revert on invalid gauge
+Voting,Batch Progress Monotonicity,test/KickoffVoteSalePool.t.sol,test_CastVotesBatch,Verify batch index only increases
+Voting,Batch Progress Monotonicity,test/KickoffVoteSalePool.t.sol,test_CastVotesBatch_MultipleRounds,Multiple batch calls complete all NFTs
+Finalization,Bribe Claim Safety,test/KickoffVoteSalePool.t.sol,test_FinalizeEpoch,Verify single-tx finalization
+Finalization,Bribe Claim Safety,test/KickoffVoteSalePool.t.sol,test_FinalizeEpochBatch,Verify batch reward claiming
+Finalization,Token Allocation Conservation,test/KickoffVoteSalePool.t.sol,test_Allocations,saleAllocation + liquidityAllocation == totalAllocation
+Finalization,Slippage Protection,test/KickoffVoteSalePool.t.sol,test_SwapSlippageValidation,Revert if slippage > 5000 bps
+Finalization,Slippage Protection,test/KickoffVoteSalePool.t.sol,test_SlippageProtection,Swap respects minOut
+Finalization,LP Lock Finality,test/LPLocker.t.sol,test_LPLocked,Verify LP locked permanently
+Claim,Single Claim Per User,test/KickoffVoteSalePool.t.sol,test_DoubleClaim,Revert if user claims twice
+Claim,Pro-rata Distribution,test/KickoffVoteSalePool.t.sol,test_ClaimProjectTokens,Verify pro-rata token distribution
+Claim,Pro-rata Distribution,test/KickoffVoteSalePool.t.sol,test_ClaimableTokensView,View function returns correct amount
+Claim,NFT Ownership Conservation,test/KickoffVoteSalePool.t.sol,test_UnlockVeAERO,Verify NFT return to owner
+Claim,NFT Ownership Conservation,test/KickoffVoteSalePool.t.sol,test_UnlockVeAERO_RevertNotOwner,Revert if caller not original owner
+Claim,Admin Fee Split,test/LPLocker.t.sol,test_FeeDistribution,Verify 20/80 split (admin/project owner)
+Claim,Admin Fee Split,test/LPLocker.t.sol,test_ClaimTradingFees,Admin can claim 20% of trading fees
+Claim,Admin Fee Split,test/LPLocker.t.sol,test_ClaimTradingFees_ProjectOwner,Project owner can claim 80% of trading fees
+Emergency,Emergency Withdrawal Correctness,test/KickoffVoteSalePool.t.sol,test_EmergencyWithdraw,Verify single NFT emergency return
+Emergency,Emergency Withdrawal Correctness,test/KickoffVoteSalePool.t.sol,test_EmergencyWithdrawBatch,Verify batch emergency return
+Reentrancy,Reentrancy Guard,test/KickoffVoteSalePool.t.sol,test_ReentrancyProtection,Verify nonReentrant guards
+Reentrancy,Reentrancy Guard,test/LPLocker.t.sol,test_ReentrancyProtection,Verify nonReentrant guards
+Access Control,Admin Access Control,test/KickoffVoteSalePool.t.sol,test_OnlyAdmin,Revert if non-admin calls restricted functions
+Access Control,Owner Access Control,test/KickoffVoteSalePool.t.sol,test_OnlyOwner,Revert if non-owner calls emergency functions
+Access Control,Two-Step Ownership,test/KickoffFactory.t.sol,test_TransferOwnership,Verify two-step transfer
+Access Control,Two-Step Ownership,test/KickoffVoteSalePool.t.sol,test_TransferOwnership,Verify two-step transfer
+Integration,Full Flow,test/integration/FullFlow.t.sol,test_Fork_FullFlow,End-to-end flow on Base fork
+Integration,External Contract Integration,test/integration/FullFlow.t.sol,test_Fork_AerodromeInterfaces,Verify Aerodrome contract interfaces
