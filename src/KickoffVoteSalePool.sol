@@ -105,10 +105,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
                                  STATE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Admin address (pool creator, receives 20% trading fees)
+    /// @notice Admin address (pool creator, receives 30% trading fees)
     address public immutable admin;
 
-    /// @notice Project owner address (receives 80% trading fees)
+    /// @notice Project owner address (receives 70% trading fees)
     address public immutable projectOwner;
 
     /// @notice Project token address

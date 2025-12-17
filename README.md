@@ -36,7 +36,7 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 ┌─────────────────────────────────────────────────────────────────┐
 │                         LPLocker                                │
 │  - Permanently locks LP tokens                                  │
-│  - Distributes trading fees (20% admin / 80% project)           │
+│  - Distributes trading fees (30% admin / 70% project)           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -203,4 +203,5 @@ MIT
 - Website: https://www.kickoff.fun/
 - Documentation: [Coming Soon]
 - Aerodrome: https://aerodrome.finance
+
 

@@ -105,8 +105,8 @@ contract FullFlowTest is Test {
             return;
         }
 
-        assertEq(lpLocker.ADMIN_FEE_BPS(), 2000); // 20%
-        assertEq(lpLocker.PROJECT_OWNER_FEE_BPS(), 8000); // 80%
+        assertEq(lpLocker.ADMIN_FEE_BPS(), 3000); // 30%
+        assertEq(lpLocker.PROJECT_OWNER_FEE_BPS(), 7000); // 70%
         assertEq(lpLocker.BPS_DENOMINATOR(), 10000);
     }
 

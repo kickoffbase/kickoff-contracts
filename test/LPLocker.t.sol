@@ -117,9 +117,9 @@ contract LPLockerTest is Test {
         vm.prank(admin);
         lpLocker.claimTradingFees(votePool);
 
-        // Verify split: 20% admin, 80% project owner
-        uint256 expectedAdminShare = (FEES_AMOUNT * 2000) / 10000; // 20%
-        uint256 expectedProjectShare = FEES_AMOUNT - expectedAdminShare; // 80%
+        // Verify split: 30% admin, 70% project owner
+        uint256 expectedAdminShare = (FEES_AMOUNT * 3000) / 10000; // 30%
+        uint256 expectedProjectShare = FEES_AMOUNT - expectedAdminShare; // 70%
 
         assertEq(token0.balanceOf(admin), expectedAdminShare);
         assertEq(token1.balanceOf(admin), expectedAdminShare);
@@ -139,7 +139,7 @@ contract LPLockerTest is Test {
         lpLocker.claimTradingFees(votePool);
 
         // Verify split
-        uint256 expectedAdminShare = (FEES_AMOUNT * 2000) / 10000;
+        uint256 expectedAdminShare = (FEES_AMOUNT * 3000) / 10000;
         uint256 expectedProjectShare = FEES_AMOUNT - expectedAdminShare;
 
         assertEq(token0.balanceOf(admin), expectedAdminShare);
@@ -185,16 +185,16 @@ contract LPLockerTest is Test {
         (uint256 adminShare0, uint256 adminShare1, uint256 projectShare0, uint256 projectShare1) =
             lpLocker.getPendingShares(votePool);
 
-        // 20% admin, 80% project
-        assertEq(adminShare0, 20 ether);
-        assertEq(adminShare1, 20 ether);
-        assertEq(projectShare0, 80 ether);
-        assertEq(projectShare1, 80 ether);
+        // 30% admin, 70% project
+        assertEq(adminShare0, 30 ether);
+        assertEq(adminShare1, 30 ether);
+        assertEq(projectShare0, 70 ether);
+        assertEq(projectShare1, 70 ether);
     }
 
     function test_Constants() public view {
-        assertEq(lpLocker.ADMIN_FEE_BPS(), 2000);
-        assertEq(lpLocker.PROJECT_OWNER_FEE_BPS(), 8000);
+        assertEq(lpLocker.ADMIN_FEE_BPS(), 3000);
+        assertEq(lpLocker.PROJECT_OWNER_FEE_BPS(), 7000);
         assertEq(lpLocker.BPS_DENOMINATOR(), 10000);
     }
 

@@ -338,11 +338,11 @@ contract RealVeAEROTest is Test {
             
             console.log("");
             console.log("REAL Fees Distributed!");
-            console.log("Admin (20%) received:");
+            console.log("Admin (30%) received:");
             console.log("  KICK:", adminKickReceived / 1e18);
             console.log("  WETH:", adminWethReceived / 1e18);
             console.log("");
-            console.log("Project Owner (80%) received:");
+            console.log("Project Owner (70%) received:");
             console.log("  KICK:", projKickReceived / 1e18);
             console.log("  WETH:", projWethReceived / 1e18);
         } catch Error(string memory reason) {
@@ -380,8 +380,8 @@ contract RealVeAEROTest is Test {
             LPLocker.LockedLP memory lp = lpLocker.getLockedLP(address(pool));
             console.log("LP Lock:");
             console.log("  Locked Forever:", lp.totalLP / 1e18, "LP");
-            console.log("  Admin (20% fees):", lp.admin);
-            console.log("  Project (80% fees):", lp.projectOwner);
+            console.log("  Admin (30% fees):", lp.admin);
+            console.log("  Project (70% fees):", lp.projectOwner);
         }
         
         console.log("");

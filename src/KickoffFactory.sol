@@ -101,7 +101,7 @@ contract KickoffFactory {
 
     /// @notice Create a new Vote-Sale pool for a project
     /// @param projectToken The project's ERC20 token address
-    /// @param projectOwner The project owner address (receives 80% of trading fees)
+    /// @param projectOwner The project owner address (receives 70% of trading fees)
     /// @param totalAllocation Total amount of project tokens (split 50/50: sale + liquidity)
     /// @return pool The address of the created pool
     function createPool(
@@ -120,7 +120,7 @@ contract KickoffFactory {
         }
 
         // Deploy new pool
-        // msg.sender becomes the admin (receives 20% of trading fees)
+        // msg.sender becomes the admin (receives 30% of trading fees)
         pool = address(
             new KickoffVoteSalePool(
                 projectToken,

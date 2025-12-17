@@ -5,7 +5,7 @@ import {IPool} from "./interfaces/IPool.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 
 /// @title LPLocker
-/// @notice Permanent LP lock with trading fees distribution (20% Admin / 80% Project Owner)
+/// @notice Permanent LP lock with trading fees distribution (30% Admin / 70% Project Owner)
 /// @dev LP tokens are locked forever, only trading fees can be claimed
 contract LPLocker {
     /*//////////////////////////////////////////////////////////////
@@ -64,8 +64,8 @@ contract LPLocker {
     struct LockedLP {
         address lpToken; // Aerodrome LP token address
         address aerodromePool; // Aerodrome Pool contract (for claimFees)
-        address admin; // Receives 20% of trading fees
-        address projectOwner; // Receives 80% of trading fees
+        address admin; // Receives 30% of trading fees
+        address projectOwner; // Receives 70% of trading fees
         uint256 totalLP; // Total LP locked (forever)
         bool exists; // Whether this pool exists
     }
@@ -74,11 +74,11 @@ contract LPLocker {
                                  STATE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Fee split for admin (20%)
-    uint256 public constant ADMIN_FEE_BPS = 2000;
+    /// @notice Fee split for admin (30%)
+    uint256 public constant ADMIN_FEE_BPS = 3000;
 
-    /// @notice Fee split for project owner (80%)
-    uint256 public constant PROJECT_OWNER_FEE_BPS = 8000;
+    /// @notice Fee split for project owner (70%)
+    uint256 public constant PROJECT_OWNER_FEE_BPS = 7000;
 
     /// @notice Basis points denominator
     uint256 public constant BPS_DENOMINATOR = 10000;
@@ -96,8 +96,8 @@ contract LPLocker {
     /// @notice Lock LP tokens permanently
     /// @param lpToken The Aerodrome LP token address
     /// @param aerodromePool The Aerodrome Pool contract address
-    /// @param admin The admin address (receives 20% fees)
-    /// @param projectOwner The project owner address (receives 80% fees)
+    /// @param admin The admin address (receives 30% fees)
+    /// @param projectOwner The project owner address (receives 70% fees)
     /// @param amount The amount of LP tokens to lock
     function lockLP(
         address lpToken,
@@ -134,7 +134,7 @@ contract LPLocker {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Claim trading fees for a vote pool
-    /// @dev Can be called by either admin (gets 20%) or project owner (gets 80%)
+    /// @dev Can be called by either admin (gets 30%) or project owner (gets 70%)
     /// @param votePool The vote pool address
     function claimTradingFees(address votePool) external nonReentrant {
         LockedLP storage pool = lockedPools[votePool];
