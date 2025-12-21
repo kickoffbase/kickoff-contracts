@@ -36,15 +36,25 @@ interface IVoter {
     /// @return The gauge address
     function gauges(address pool) external view returns (address);
 
-    /// @notice Get the internal bribe contract for a gauge
+    /// @notice Get the internal bribe contract for a gauge (legacy name)
     /// @param gauge The gauge address
     /// @return The internal bribe address
     function internal_bribes(address gauge) external view returns (address);
 
-    /// @notice Get the external bribe contract for a gauge
+    /// @notice Get the external bribe contract for a gauge (legacy name)
     /// @param gauge The gauge address
     /// @return The external bribe address
     function external_bribes(address gauge) external view returns (address);
+
+    /// @notice Get the fees reward contract for a gauge (Aerodrome V2)
+    /// @param gauge The gauge address
+    /// @return The fees reward contract address
+    function gaugeToFees(address gauge) external view returns (address);
+
+    /// @notice Get the bribe reward contract for a gauge (Aerodrome V2)
+    /// @param gauge The gauge address
+    /// @return The bribe reward contract address
+    function gaugeToBribe(address gauge) external view returns (address);
 
     /// @notice Get the pool for a gauge
     /// @param gauge The gauge address

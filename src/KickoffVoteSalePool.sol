@@ -10,6 +10,7 @@ import {IPool} from "./interfaces/IPool.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IWETH} from "./interfaces/IWETH.sol";
 import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
+import {IVotingReward} from "./interfaces/IVotingReward.sol";
 
 /// @title KickoffVoteSalePool
 /// @notice Vote-Sale pool for veAERO holders to participate in project launches
@@ -191,7 +192,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     bool public batchInProgress;
 
     /// @notice Bribe tokens for batch claim (stored between batches)
-    address[] private _batchBribeTokens;
+    /// @dev Cached reward tokens for batch operations (auto-discovered)
+    address[] private _cachedRewardTokens;
 
     /*//////////////////////////////////////////////////////////////
                           SLIPPAGE PROTECTION
@@ -343,6 +345,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
             
             gauge = _gauge;
             aerodromePool = pool;
+            
+            // Note: bribe addresses are fetched dynamically during claim via gaugeToFees/gaugeToBribe
+            
             batchIndex = 0;
             batchInProgress = true;
         }
@@ -389,6 +394,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         gauge = _gauge;
         aerodromePool = pool;
+        
+        // Note: bribe addresses are fetched dynamically during claim via gaugeToFees/gaugeToBribe
 
         address[] memory pools = new address[](1);
         uint256[] memory weights = new uint256[](1);
@@ -429,10 +436,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Current finalize step
     FinalizeStep public finalizeStep;
 
-    /// @notice Start claiming rewards in batches
-    /// @param bribeTokens Array of bribe token addresses to claim
-    /// @param batchSize Number of NFTs to process
-    function startClaimRewardsBatch(address[] calldata bribeTokens, uint256 batchSize) 
+    /// @notice Start claiming rewards in batches with auto-discovery of reward tokens
+    /// @param batchSize Number of NFTs to process per batch
+    function startClaimRewardsBatch(uint256 batchSize) 
         external 
         onlyAdmin 
         inState(PoolState.Voting) 
@@ -442,10 +448,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
         _setState(PoolState.Finalizing);
         finalizeStep = FinalizeStep.ClaimingRewards;
         
-        // Store bribe tokens for subsequent batches
-        delete _batchBribeTokens;
-        for (uint256 i = 0; i < bribeTokens.length; i++) {
-            _batchBribeTokens.push(bribeTokens[i]);
+        // Auto-discover and cache reward tokens
+        delete _cachedRewardTokens;
+        address[] memory discovered = _discoverRewardTokens();
+        for (uint256 i = 0; i < discovered.length; i++) {
+            _cachedRewardTokens.push(discovered[i]);
         }
         
         batchIndex = 0;
@@ -464,6 +471,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
     }
 
     /// @notice Internal batch claim logic
+    /// @dev Gets bribe addresses dynamically via gaugeToFees/gaugeToBribe (Aerodrome V2)
     function _claimRewardsBatchInternal(uint256 batchSize) internal {
         if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
         
@@ -479,16 +487,34 @@ contract KickoffVoteSalePool is IERC721Receiver {
         uint256 endIndex = batchIndex + batchSize;
         if (endIndex > length) endIndex = length;
 
-        address internalBribe = voter.internal_bribes(gauge);
-        address externalBribe = voter.external_bribes(gauge);
+        // Get bribe addresses dynamically (works in any epoch)
+        address feesReward;
+        address bribeReward;
+        
+        try voter.gaugeToFees(gauge) returns (address _fees) {
+            feesReward = _fees;
+        } catch {}
+        
+        try voter.gaugeToBribe(gauge) returns (address _bribe) {
+            bribeReward = _bribe;
+        } catch {}
+
+        // If no reward contracts found, skip to next step
+        if (feesReward == address(0) && bribeReward == address(0)) {
+            batchInProgress = false;
+            batchIndex = 0;
+            finalizeStep = FinalizeStep.ConvertingToWETH;
+            emit BatchProgress("claimRewards", length, length);
+            return;
+        }
 
         address[] memory bribes = new address[](2);
-        bribes[0] = internalBribe;
-        bribes[1] = externalBribe;
+        bribes[0] = feesReward;
+        bribes[1] = bribeReward;
 
         address[][] memory tokens = new address[][](2);
-        tokens[0] = _batchBribeTokens;
-        tokens[1] = _batchBribeTokens;
+        tokens[0] = _cachedRewardTokens;
+        tokens[1] = _cachedRewardTokens;
 
         for (uint256 i = batchIndex; i < endIndex;) {
             uint256 tokenId = lockedTokenIds[i];
@@ -513,8 +539,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (batchInProgress) revert BatchInProgress();
         if (finalizeStep != FinalizeStep.ConvertingToWETH) revert InvalidState();
 
-        // Convert all tokens to WETH
-        _convertToWETH(_batchBribeTokens);
+        // Convert all cached tokens to WETH
+        _convertToWETHInternal(_cachedRewardTokens);
 
         // Add liquidity
         _addLiquidity();
@@ -523,7 +549,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         _lockLP();
 
         // Cleanup
-        delete _batchBribeTokens;
+        delete _cachedRewardTokens;
         finalizeStep = FinalizeStep.Completed;
         
         _setState(PoolState.Completed);
@@ -531,18 +557,21 @@ contract KickoffVoteSalePool is IERC721Receiver {
     }
 
     /// @notice Finalize the epoch in one transaction (for small number of NFTs)
-    /// @param bribeTokens Array of bribe token addresses to claim and convert
+    /// @dev Automatically discovers reward tokens from VotingReward contracts
     /// @dev Use batch functions for large numbers of NFTs
-    function finalizeEpoch(address[] calldata bribeTokens) external nonReentrant onlyAdmin inState(PoolState.Voting) {
+    function finalizeEpoch() external nonReentrant onlyAdmin inState(PoolState.Voting) {
         if (batchInProgress) revert BatchInProgress();
         
         _setState(PoolState.Finalizing);
 
-        // Claim rewards (non-batch)
-        _claimRewardsAll(bribeTokens);
+        // Auto-discover reward tokens
+        address[] memory rewardTokens = _discoverRewardTokens();
+
+        // Claim all rewards
+        _claimRewardsAll(rewardTokens);
 
         // Convert to WETH
-        _convertToWETH(bribeTokens);
+        _convertToWETHInternal(rewardTokens);
 
         // Add liquidity
         _addLiquidity();
@@ -554,18 +583,156 @@ contract KickoffVoteSalePool is IERC721Receiver {
         emit EpochFinalized(wethCollected, lpCreated);
     }
 
+    /// @notice Discover reward tokens that have earned rewards for our locked NFTs
+    /// @dev Checks both fees and bribe contracts, returns only tokens with actual rewards
+    /// @return tokens Array of token addresses that have rewards to claim
+    function _discoverRewardTokens() internal view returns (address[] memory tokens) {
+        address feesReward;
+        address bribeReward;
+        
+        try voter.gaugeToFees(gauge) returns (address _f) { feesReward = _f; } catch {}
+        try voter.gaugeToBribe(gauge) returns (address _b) { bribeReward = _b; } catch {}
+        
+        // Get tokens with actual rewards from both contracts
+        address[] memory feesTokens = _getTokensWithRewards(feesReward);
+        address[] memory bribeTokens = _getTokensWithRewards(bribeReward);
+        
+        // Combine arrays (deduplicate)
+        return _mergeTokenArrays(feesTokens, bribeTokens);
+    }
+
+    /// @notice Get tokens that have actual earned rewards in a VotingReward contract
+    /// @dev Uses low-level calls for rewardsListLength + rewardsList + earned
+    function _getTokensWithRewards(address rewardContract) internal view returns (address[] memory tokens) {
+        if (rewardContract == address(0)) return new address[](0);
+        
+        // Get rewards list length
+        uint256 length = _getRewardsListLength(rewardContract);
+        if (length == 0) return new address[](0);
+        if (length > 30) length = 30;
+        
+        // Collect tokens that have rewards
+        address[] memory tempTokens = new address[](length);
+        uint256 validCount = 0;
+        
+        for (uint256 i = 0; i < length; i++) {
+            address token = _getRewardTokenAt(rewardContract, i);
+            if (token == address(0)) continue;
+            
+            if (_hasEarnedRewards(rewardContract, token)) {
+                tempTokens[validCount++] = token;
+            }
+        }
+        
+        // Copy to correctly sized array
+        tokens = new address[](validCount);
+        for (uint256 i = 0; i < validCount; i++) {
+            tokens[i] = tempTokens[i];
+        }
+    }
+
+    /// @notice Get rewardsListLength from a VotingReward contract
+    function _getRewardsListLength(address rewardContract) internal view returns (uint256) {
+        (bool success, bytes memory data) = rewardContract.staticcall(
+            abi.encodeWithSignature("rewardsListLength()")
+        );
+        if (!success || data.length < 32) return 0;
+        return abi.decode(data, (uint256));
+    }
+
+    /// @notice Get reward token at index from a VotingReward contract
+    /// @dev Aerodrome uses `rewards` array, so getter is rewards(uint256)
+    function _getRewardTokenAt(address rewardContract, uint256 index) internal view returns (address) {
+        // Aerodrome VotingReward stores tokens in `rewards` array
+        (bool success, bytes memory data) = rewardContract.staticcall(
+            abi.encodeWithSignature("rewards(uint256)", index)
+        );
+        if (success && data.length >= 32) {
+            return abi.decode(data, (address));
+        }
+        return address(0);
+    }
+
+    /// @notice Check if any locked NFT has earned rewards for a token
+    /// @dev Checks all NFTs - if any has rewards, returns true immediately
+    function _hasEarnedRewards(address rewardContract, address token) internal view returns (bool) {
+        uint256 nftCount = lockedTokenIds.length;
+        
+        for (uint256 i = 0; i < nftCount; i++) {
+            (bool success, bytes memory data) = rewardContract.staticcall(
+                abi.encodeWithSignature("earned(address,uint256)", token, lockedTokenIds[i])
+            );
+            if (success && data.length >= 32) {
+                uint256 earned = abi.decode(data, (uint256));
+                if (earned > 0) return true;
+            }
+        }
+        return false;
+    }
+
+    /// @notice Merge two token arrays and remove duplicates
+    function _mergeTokenArrays(address[] memory a, address[] memory b) internal pure returns (address[] memory) {
+        if (a.length == 0) return b;
+        if (b.length == 0) return a;
+        
+        // Combine with deduplication
+        address[] memory temp = new address[](a.length + b.length);
+        uint256 count = 0;
+        
+        // Add all from a
+        for (uint256 i = 0; i < a.length; i++) {
+            temp[count++] = a[i];
+        }
+        
+        // Add from b if not duplicate
+        for (uint256 i = 0; i < b.length; i++) {
+            bool isDuplicate = false;
+            for (uint256 j = 0; j < a.length; j++) {
+                if (b[i] == a[j]) {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            if (!isDuplicate) {
+                temp[count++] = b[i];
+            }
+        }
+        
+        // Copy to correctly sized array
+        address[] memory result = new address[](count);
+        for (uint256 i = 0; i < count; i++) {
+            result[i] = temp[i];
+        }
+        return result;
+    }
+
     /// @notice Claim all rewards in one transaction
-    function _claimRewardsAll(address[] calldata bribeTokens) internal {
-        address internalBribe = voter.internal_bribes(gauge);
-        address externalBribe = voter.external_bribes(gauge);
+    /// @dev Gets bribe addresses dynamically via gaugeToFees/gaugeToBribe (Aerodrome V2)
+    function _claimRewardsAll(address[] memory rewardTokens) internal {
+        // Get bribe addresses dynamically (works in any epoch)
+        address feesReward;
+        address bribeReward;
+        
+        try voter.gaugeToFees(gauge) returns (address _fees) {
+            feesReward = _fees;
+        } catch {}
+        
+        try voter.gaugeToBribe(gauge) returns (address _bribe) {
+            bribeReward = _bribe;
+        } catch {}
+
+        // If no reward contracts found, skip claiming
+        if (feesReward == address(0) && bribeReward == address(0)) {
+            return;
+        }
 
         address[] memory bribes = new address[](2);
-        bribes[0] = internalBribe;
-        bribes[1] = externalBribe;
+        bribes[0] = feesReward;   // LP fees
+        bribes[1] = bribeReward;  // External bribes
 
         address[][] memory tokens = new address[][](2);
-        tokens[0] = bribeTokens;
-        tokens[1] = bribeTokens;
+        tokens[0] = rewardTokens;
+        tokens[1] = rewardTokens;
 
         uint256 length = lockedTokenIds.length;
         for (uint256 i = 0; i < length;) {
@@ -586,25 +753,15 @@ contract KickoffVoteSalePool is IERC721Receiver {
         return (finalizeStep, batchIndex, lockedTokenIds.length, batchInProgress);
     }
 
-    /// @notice Convert bribe tokens to WETH (calldata version)
-    function _convertToWETH(address[] calldata bribeTokens) internal {
-        _convertToWETHInternal(bribeTokens);
-    }
-
-    /// @notice Convert bribe tokens to WETH (storage version for batch)
-    function _convertToWETH(address[] storage bribeTokens) internal {
-        _convertToWETHInternal(bribeTokens);
-    }
-
-    /// @notice Internal convert logic with slippage protection
-    function _convertToWETHInternal(address[] memory bribeTokens) internal {
+    /// @notice Convert reward tokens to WETH with slippage protection
+    function _convertToWETHInternal(address[] memory rewardTokens) internal {
         address routerAddr = address(router);
         address wethAddr = address(weth);
         address defaultFactory = router.defaultFactory();
 
-        uint256 length = bribeTokens.length;
+        uint256 length = rewardTokens.length;
         for (uint256 i = 0; i < length;) {
-            address token = bribeTokens[i];
+            address token = rewardTokens[i];
 
             // Skip WETH
             if (token == wethAddr) {
@@ -904,6 +1061,130 @@ contract KickoffVoteSalePool is IERC721Receiver {
     {
         LockedNFT storage nft = lockedNFTs[tokenId];
         return (nft.owner, nft.votingPower, nft.unlocked);
+    }
+
+    /// @notice Get pending rewards for a specific NFT
+    /// @param tokenId The veAERO NFT token ID
+    /// @param rewardTokens Array of reward token addresses to check
+    /// @return feesEarned Array of earned amounts from fees (LP trading fees)
+    /// @return bribesEarned Array of earned amounts from bribes (external)
+    function getPendingRewards(uint256 tokenId, address[] calldata rewardTokens) 
+        external 
+        view 
+        returns (uint256[] memory feesEarned, uint256[] memory bribesEarned) 
+    {
+        feesEarned = new uint256[](rewardTokens.length);
+        bribesEarned = new uint256[](rewardTokens.length);
+        
+        if (gauge == address(0)) return (feesEarned, bribesEarned);
+        
+        address feesReward;
+        address bribeReward;
+        
+        try voter.gaugeToFees(gauge) returns (address _fees) {
+            feesReward = _fees;
+        } catch {}
+        
+        try voter.gaugeToBribe(gauge) returns (address _bribe) {
+            bribeReward = _bribe;
+        } catch {}
+        
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (feesReward != address(0)) {
+                try IVotingReward(feesReward).earned(rewardTokens[i], tokenId) returns (uint256 amount) {
+                    feesEarned[i] = amount;
+                } catch {}
+            }
+            if (bribeReward != address(0)) {
+                try IVotingReward(bribeReward).earned(rewardTokens[i], tokenId) returns (uint256 amount) {
+                    bribesEarned[i] = amount;
+                } catch {}
+            }
+        }
+    }
+
+    /// @notice Get reward contract addresses for the current gauge
+    /// @return feesReward The fees reward contract (LP trading fees)
+    /// @return bribeReward The bribe reward contract (external bribes)
+    function getRewardContracts() external view returns (address feesReward, address bribeReward) {
+        if (gauge == address(0)) return (address(0), address(0));
+        
+        try voter.gaugeToFees(gauge) returns (address _fees) {
+            feesReward = _fees;
+        } catch {}
+        
+        try voter.gaugeToBribe(gauge) returns (address _bribe) {
+            bribeReward = _bribe;
+        } catch {}
+    }
+
+    /// @notice Get all available reward tokens that have actual rewards to claim
+    /// @return feesTokens Array of token addresses with rewards from fees contract
+    /// @return bribeTokens Array of token addresses with rewards from bribe contract
+    function getAvailableRewardTokens() external view returns (
+        address[] memory feesTokens,
+        address[] memory bribeTokens
+    ) {
+        if (gauge == address(0)) return (new address[](0), new address[](0));
+        
+        address feesReward;
+        address bribeReward;
+        
+        try voter.gaugeToFees(gauge) returns (address _fees) {
+            feesReward = _fees;
+        } catch {}
+        
+        try voter.gaugeToBribe(gauge) returns (address _bribe) {
+            bribeReward = _bribe;
+        } catch {}
+        
+        feesTokens = _getTokensWithRewards(feesReward);
+        bribeTokens = _getTokensWithRewards(bribeReward);
+    }
+
+    /// @notice Get total claimable rewards for all locked NFTs
+    /// @param rewardTokens Array of token addresses to check
+    /// @return amounts Array of total claimable amounts for each token
+    function getTotalClaimableRewards(address[] calldata rewardTokens) 
+        external 
+        view 
+        returns (uint256[] memory amounts) 
+    {
+        amounts = new uint256[](rewardTokens.length);
+        
+        if (gauge == address(0) || lockedTokenIds.length == 0) return amounts;
+        
+        address feesReward;
+        address bribeReward;
+        
+        try voter.gaugeToFees(gauge) returns (address _fees) {
+            feesReward = _fees;
+        } catch {}
+        
+        try voter.gaugeToBribe(gauge) returns (address _bribe) {
+            bribeReward = _bribe;
+        } catch {}
+        
+        // Sum up rewards across all locked NFTs
+        for (uint256 i = 0; i < lockedTokenIds.length; i++) {
+            uint256 tokenId = lockedTokenIds[i];
+            
+            for (uint256 j = 0; j < rewardTokens.length; j++) {
+                // Check fees rewards
+                if (feesReward != address(0)) {
+                    try IVotingReward(feesReward).earned(rewardTokens[j], tokenId) returns (uint256 earned) {
+                        amounts[j] += earned;
+                    } catch {}
+                }
+                
+                // Check bribe rewards
+                if (bribeReward != address(0)) {
+                    try IVotingReward(bribeReward).earned(rewardTokens[j], tokenId) returns (uint256 earned) {
+                        amounts[j] += earned;
+                    } catch {}
+                }
+            }
+        }
     }
 
     /*//////////////////////////////////////////////////////////////

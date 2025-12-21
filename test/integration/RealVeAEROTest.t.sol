@@ -173,13 +173,9 @@ contract RealVeAEROTest is Test {
         vm.mockCall(VOTER, abi.encodeWithSignature("claimBribes(address[],address[][],uint256)"), abi.encode());
         vm.mockCall(VOTER, abi.encodeWithSignature("claimFees(address[],address[][],uint256)"), abi.encode());
 
-        address[] memory bribeTokens = new address[](3);
-        bribeTokens[0] = AERO;
-        bribeTokens[1] = USDC;
-        bribeTokens[2] = WETH;
-
+        // Finalize with auto token discovery
         vm.prank(admin);
-        pool.finalizeEpoch(bribeTokens);
+        pool.finalizeEpoch();
         vm.clearMockedCalls();
 
         console.log("WETH Collected:", pool.wethCollected() / 1e18, "WETH");

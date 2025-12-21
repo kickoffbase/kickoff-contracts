@@ -248,12 +248,9 @@ contract KickoffVoteSalePoolTest is Test {
         // Mint some WETH to simulate bribe rewards
         weth.mint(address(pool), 10 ether);
 
-        // Finalize
-        address[] memory bribeTokens = new address[](1);
-        bribeTokens[0] = address(weth);
-
+        // Finalize (auto token discovery)
         vm.prank(admin);
-        pool.finalizeEpoch(bribeTokens);
+        pool.finalizeEpoch();
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
         assertTrue(pool.lpCreated() > 0);
@@ -426,12 +423,9 @@ contract KickoffVoteSalePoolTest is Test {
         // Simulate bribes
         weth.mint(address(pool), 10 ether);
 
-        // Finalize
-        address[] memory bribeTokens = new address[](1);
-        bribeTokens[0] = address(weth);
-
+        // Finalize (auto token discovery)
         vm.prank(admin);
-        pool.finalizeEpoch(bribeTokens);
+        pool.finalizeEpoch();
     }
 }
 
