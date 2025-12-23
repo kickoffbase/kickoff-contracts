@@ -49,8 +49,17 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 | `LPLocker` | Permanently locks LP tokens, distributes trading fees |
 | `EpochLib` | Library for Aerodrome epoch calculations |
 
+### Interfaces
+
+| Interface | Description |
+|-----------|-------------|
+| `IVotingReward` | Aerodrome VotingReward contracts (FeesVotingReward, BribeVotingReward) |
+| `IVoter` | Aerodrome Voter contract (gaugeToFees, gaugeToBribe) |
+| `IVotingEscrow` | Aerodrome veAERO NFT contract |
+
 ## Features
 
+- ✅ **Auto-discovery** of reward tokens (fees & bribes) — no manual token lists needed
 - ✅ **Batch processing** for 100+ veAERO NFTs
 - ✅ **Slippage protection** for swaps and liquidity
 - ✅ **Reentrancy guards** on all critical functions
@@ -61,8 +70,8 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 
 ```bash
 # Clone repository
-git clone https://github.com/your-username/kickoff-veaero-contracts.git
-cd kickoff-veaero-contracts
+git clone https://github.com/kickoffbase/kickoff-contracts.git
+cd kickoff-contracts
 
 # Install dependencies
 forge install
@@ -85,6 +94,9 @@ forge test -vvv
 
 # Run fork tests on Base mainnet
 forge test --fork-url https://mainnet.base.org -vvv
+
+# Run comprehensive integration test (full flow with real veAERO holders)
+forge test --match-contract ComprehensiveForkTest --fork-url https://mainnet.base.org -vvv
 ```
 
 ## Deployment
@@ -143,11 +155,25 @@ forge script script/Deploy.s.sol:Deploy \
 
 4. **Finalize** (after epoch ends)
    ```solidity
-   pool.finalizeEpoch([AERO, USDC, WETH])
-   // or for 100+ NFTs:
-   pool.startClaimRewardsBatch([tokens], 50)
-   pool.continueClaimRewardsBatch(50)
-   pool.completeFinalization()
+   // Auto-discovers reward tokens and claims them
+   pool.finalizeEpoch()
+   
+   // For 100+ NFTs (batch processing):
+   pool.startClaimRewardsBatch(50)       // Start batch, auto-discovers tokens
+   pool.continueClaimRewardsBatch(50)    // Continue until all NFTs processed
+   pool.completeFinalization()           // Finalize after all rewards claimed
+   ```
+
+5. **View Pending Rewards** (optional)
+   ```solidity
+   // Get all available reward tokens with claimable amounts
+   address[] memory tokens = pool.getAvailableRewardTokens()
+   
+   // Get pending rewards for specific NFT
+   uint256[] memory amounts = pool.getPendingRewards(tokenId, tokens)
+   
+   // Get total claimable rewards across all locked NFTs
+   uint256[] memory totals = pool.getTotalClaimableRewards(tokens)
    ```
 
 ### For veAERO Holders
