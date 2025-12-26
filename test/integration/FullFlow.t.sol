@@ -57,7 +57,7 @@ contract FullFlowTest is Test {
         // Create pool
         vm.startPrank(admin);
         IERC20(projectToken).approve(address(factory), TOTAL_ALLOCATION);
-        address poolAddr = factory.createPool(projectToken, projectOwner, TOTAL_ALLOCATION);
+        address poolAddr = factory.createPool(projectToken, projectOwner, TOTAL_ALLOCATION, 0);
         pool = KickoffVoteSalePool(poolAddr);
         vm.stopPrank();
     }

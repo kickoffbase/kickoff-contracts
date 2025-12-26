@@ -61,7 +61,7 @@ contract RealVeAEROTest is Test {
 
         vm.startPrank(admin);
         projectToken.approve(address(factory), 10_000_000 ether);
-        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether));
+        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether, 0));
         vm.stopPrank();
     }
 

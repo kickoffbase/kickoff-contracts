@@ -66,7 +66,7 @@ contract KickoffVoteSalePoolTest is Test {
         // Create pool
         vm.startPrank(admin);
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
-        address poolAddr = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION);
+        address poolAddr = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 0);
         pool = KickoffVoteSalePool(poolAddr);
         vm.stopPrank();
 
@@ -186,6 +186,55 @@ contract KickoffVoteSalePoolTest is Test {
         vm.stopPrank();
     }
 
+    function test_LockVeAERO_RevertVotingPowerTooLow() public {
+        // Create a new pool with minVotingPower requirement
+        uint256 minVP = 500_000 ether; // 500k veAERO minimum
+        
+        vm.startPrank(admin);
+        MockERC20 newToken = new MockERC20("New Token", "NEW", 18);
+        newToken.mint(admin, TOTAL_ALLOCATION);
+        newToken.approve(address(factory), TOTAL_ALLOCATION);
+        
+        KickoffVoteSalePool poolWithMin = KickoffVoteSalePool(
+            factory.createPool(address(newToken), projectOwner, TOTAL_ALLOCATION, minVP)
+        );
+        poolWithMin.activate();
+        vm.stopPrank();
+        
+        // user1 has 100_000 ether VP which is less than 500_000 ether minimum
+        vm.startPrank(user1);
+        votingEscrow.approve(address(poolWithMin), 1);
+        
+        vm.expectRevert(KickoffVoteSalePool.VotingPowerTooLow.selector);
+        poolWithMin.lockVeAERO(1);
+        vm.stopPrank();
+    }
+
+    function test_LockVeAERO_WithMinVotingPower() public {
+        // Create a new pool with minVotingPower requirement that user1 meets
+        uint256 minVP = 50_000 ether; // 50k veAERO minimum, user1 has 100k
+        
+        vm.startPrank(admin);
+        MockERC20 newToken = new MockERC20("New Token", "NEW", 18);
+        newToken.mint(admin, TOTAL_ALLOCATION);
+        newToken.approve(address(factory), TOTAL_ALLOCATION);
+        
+        KickoffVoteSalePool poolWithMin = KickoffVoteSalePool(
+            factory.createPool(address(newToken), projectOwner, TOTAL_ALLOCATION, minVP)
+        );
+        poolWithMin.activate();
+        vm.stopPrank();
+        
+        // user1 has 100_000 ether VP which is >= 50_000 ether minimum
+        vm.startPrank(user1);
+        votingEscrow.approve(address(poolWithMin), 1);
+        poolWithMin.lockVeAERO(1); // Should succeed
+        vm.stopPrank();
+        
+        assertEq(poolWithMin.totalVotingPower(), USER1_VOTING_POWER);
+        assertEq(poolWithMin.minVotingPower(), minVP);
+    }
+
     /*//////////////////////////////////////////////////////////////
                            CAST VOTES TESTS
     //////////////////////////////////////////////////////////////*/
@@ -247,6 +296,10 @@ contract KickoffVoteSalePoolTest is Test {
 
         // Mint some WETH to simulate bribe rewards
         weth.mint(address(pool), 10 ether);
+
+        // Advance to next epoch (rewards are claimable only after epoch ends)
+        uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
+        vm.warp(nextEpochStart + 1 hours);
 
         // Finalize (auto token discovery)
         vm.prank(admin);
@@ -422,6 +475,10 @@ contract KickoffVoteSalePoolTest is Test {
 
         // Simulate bribes
         weth.mint(address(pool), 10 ether);
+
+        // Advance to next epoch (rewards are claimable only after epoch ends)
+        uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
+        vm.warp(nextEpochStart + 1 hours);
 
         // Finalize (auto token discovery)
         vm.prank(admin);

@@ -49,8 +49,8 @@ contract KickoffFactoryTest is Test {
         // Approve tokens
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
 
-        // Create pool
-        address pool = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION);
+        // Create pool (minVotingPower = 0)
+        address pool = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 0);
 
         vm.stopPrank();
 
@@ -79,10 +79,10 @@ contract KickoffFactoryTest is Test {
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
 
         vm.expectRevert(KickoffFactory.ZeroAddress.selector);
-        factory.createPool(address(0), projectOwner, TOTAL_ALLOCATION);
+        factory.createPool(address(0), projectOwner, TOTAL_ALLOCATION, 0);
 
         vm.expectRevert(KickoffFactory.ZeroAddress.selector);
-        factory.createPool(address(projectToken), address(0), TOTAL_ALLOCATION);
+        factory.createPool(address(projectToken), address(0), TOTAL_ALLOCATION, 0);
 
         vm.stopPrank();
     }
@@ -92,7 +92,7 @@ contract KickoffFactoryTest is Test {
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
 
         vm.expectRevert(KickoffFactory.ZeroAmount.selector);
-        factory.createPool(address(projectToken), projectOwner, 0);
+        factory.createPool(address(projectToken), projectOwner, 0, 0);
 
         vm.stopPrank();
     }
@@ -100,10 +100,10 @@ contract KickoffFactoryTest is Test {
     function test_CreatePool_RevertDuplicate() public {
         vm.startPrank(admin);
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
-        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2);
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2, 0);
 
         vm.expectRevert(KickoffFactory.PoolAlreadyExists.selector);
-        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2);
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2, 0);
 
         vm.stopPrank();
     }
@@ -119,10 +119,10 @@ contract KickoffFactoryTest is Test {
         vm.startPrank(admin);
 
         token1.approve(address(factory), TOTAL_ALLOCATION);
-        address pool1 = factory.createPool(address(token1), projectOwner, TOTAL_ALLOCATION);
+        address pool1 = factory.createPool(address(token1), projectOwner, TOTAL_ALLOCATION, 0);
 
         token2.approve(address(factory), TOTAL_ALLOCATION);
-        address pool2 = factory.createPool(address(token2), projectOwner, TOTAL_ALLOCATION);
+        address pool2 = factory.createPool(address(token2), projectOwner, TOTAL_ALLOCATION, 0);
 
         vm.stopPrank();
 

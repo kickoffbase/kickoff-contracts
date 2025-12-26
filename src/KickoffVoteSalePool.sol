@@ -57,6 +57,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error SlippageExceeded();
     error InvalidGauge();
     error GaugeNotActive();
+    error EpochNotEnded();
+    error VotingPowerTooLow();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -123,6 +125,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Liquidity allocation (50% of total, for LP creation)
     uint256 public immutable liquidityAllocation;
+
+    /// @notice Minimum voting power required to lock veAERO NFT
+    uint256 public immutable minVotingPower;
 
     /// @notice LP Locker contract
     LPLocker public immutable lpLocker;
@@ -240,6 +245,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         address _admin,
         address _projectOwner,
         uint256 _totalAllocation,
+        uint256 _minVotingPower,
         address _lpLocker,
         address _votingEscrow,
         address _voter,
@@ -252,6 +258,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         totalAllocation = _totalAllocation;
         saleAllocation = _totalAllocation / 2;
         liquidityAllocation = _totalAllocation - saleAllocation;
+        minVotingPower = _minVotingPower;
 
         lpLocker = LPLocker(_lpLocker);
         votingEscrow = IVotingEscrow(_votingEscrow);
@@ -298,6 +305,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         // Get voting power
         uint256 votingPowerAmount = votingEscrow.balanceOfNFT(tokenId);
+        
+        // Check minimum voting power requirement
+        if (votingPowerAmount < minVotingPower) {
+            revert VotingPowerTooLow();
+        }
 
         // Transfer NFT to this contract
         votingEscrow.safeTransferFrom(msg.sender, address(this), tokenId);
@@ -445,6 +457,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     {
         if (batchInProgress) revert BatchInProgress();
         
+        // Ensure voting epoch has ended (rewards are only claimable after epoch end)
+        if (block.timestamp < EpochLib.epochEnd(activeEpoch)) revert EpochNotEnded();
+        
         _setState(PoolState.Finalizing);
         finalizeStep = FinalizeStep.ClaimingRewards;
         
@@ -508,18 +523,26 @@ contract KickoffVoteSalePool is IERC721Receiver {
             return;
         }
 
-        address[] memory bribes = new address[](2);
-        bribes[0] = feesReward;
-        bribes[1] = bribeReward;
-
-        address[][] memory tokens = new address[][](2);
-        tokens[0] = _cachedRewardTokens;
-        tokens[1] = _cachedRewardTokens;
+        // Build arrays only with valid (non-zero) addresses
+        uint256 rewardContractCount = (feesReward != address(0) ? 1 : 0) + (bribeReward != address(0) ? 1 : 0);
+        address[] memory rewardContracts = new address[](rewardContractCount);
+        address[][] memory tokenArrays = new address[][](rewardContractCount);
+        
+        uint256 idx = 0;
+        if (feesReward != address(0)) {
+            rewardContracts[idx] = feesReward;
+            tokenArrays[idx] = _cachedRewardTokens;
+            idx++;
+        }
+        if (bribeReward != address(0)) {
+            rewardContracts[idx] = bribeReward;
+            tokenArrays[idx] = _cachedRewardTokens;
+        }
 
         for (uint256 i = batchIndex; i < endIndex;) {
             uint256 tokenId = lockedTokenIds[i];
-            try voter.claimBribes(bribes, tokens, tokenId) {} catch {}
-            try voter.claimFees(bribes, tokens, tokenId) {} catch {}
+            // Single call claims from all reward contracts (fees + bribes)
+            try voter.claimBribes(rewardContracts, tokenArrays, tokenId) {} catch {}
             unchecked { ++i; }
         }
 
@@ -561,6 +584,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @dev Use batch functions for large numbers of NFTs
     function finalizeEpoch() external nonReentrant onlyAdmin inState(PoolState.Voting) {
         if (batchInProgress) revert BatchInProgress();
+        
+        // Ensure voting epoch has ended (rewards are only claimable after epoch end)
+        if (block.timestamp < EpochLib.epochEnd(activeEpoch)) revert EpochNotEnded();
         
         _setState(PoolState.Finalizing);
 
@@ -726,19 +752,27 @@ contract KickoffVoteSalePool is IERC721Receiver {
             return;
         }
 
-        address[] memory bribes = new address[](2);
-        bribes[0] = feesReward;   // LP fees
-        bribes[1] = bribeReward;  // External bribes
-
-        address[][] memory tokens = new address[][](2);
-        tokens[0] = rewardTokens;
-        tokens[1] = rewardTokens;
+        // Build arrays only with valid (non-zero) addresses
+        uint256 rewardContractCount = (feesReward != address(0) ? 1 : 0) + (bribeReward != address(0) ? 1 : 0);
+        address[] memory rewardContracts = new address[](rewardContractCount);
+        address[][] memory tokenArrays = new address[][](rewardContractCount);
+        
+        uint256 idx = 0;
+        if (feesReward != address(0)) {
+            rewardContracts[idx] = feesReward;
+            tokenArrays[idx] = rewardTokens;
+            idx++;
+        }
+        if (bribeReward != address(0)) {
+            rewardContracts[idx] = bribeReward;
+            tokenArrays[idx] = rewardTokens;
+        }
 
         uint256 length = lockedTokenIds.length;
         for (uint256 i = 0; i < length;) {
             uint256 tokenId = lockedTokenIds[i];
-            try voter.claimBribes(bribes, tokens, tokenId) {} catch {}
-            try voter.claimFees(bribes, tokens, tokenId) {} catch {}
+            // Single call claims from all reward contracts (fees + bribes)
+            try voter.claimBribes(rewardContracts, tokenArrays, tokenId) {} catch {}
             unchecked { ++i; }
         }
     }

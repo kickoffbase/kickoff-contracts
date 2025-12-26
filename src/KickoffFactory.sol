@@ -103,11 +103,13 @@ contract KickoffFactory {
     /// @param projectToken The project's ERC20 token address
     /// @param projectOwner The project owner address (receives 70% of trading fees)
     /// @param totalAllocation Total amount of project tokens (split 50/50: sale + liquidity)
+    /// @param minVotingPower Minimum voting power required to lock veAERO NFT (0 = no minimum)
     /// @return pool The address of the created pool
     function createPool(
         address projectToken,
         address projectOwner,
-        uint256 totalAllocation
+        uint256 totalAllocation,
+        uint256 minVotingPower
     ) external returns (address pool) {
         if (projectToken == address(0) || projectOwner == address(0)) {
             revert ZeroAddress();
@@ -127,6 +129,7 @@ contract KickoffFactory {
                 msg.sender, // admin
                 projectOwner,
                 totalAllocation,
+                minVotingPower,
                 address(lpLocker),
                 votingEscrow,
                 voter,

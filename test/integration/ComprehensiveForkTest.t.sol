@@ -32,16 +32,17 @@ contract ComprehensiveForkTest is Test {
     address constant WETH_AERO_POOL = 0x7f670f78B17dEC44d5Ef68a48740b6f8849cc2e6;
     address constant WETH_AERO_GAUGE = 0x96a24aB830D4ec8b1F6f04Ceac104F1A3b211a01;
 
-    // ============ 52 NFT IDs from Dune ============
+    // ============ 70 NFT IDs from Dune ============
     // Source: https://dune.com/jpn/veaero-leaderboard
     // Top veAERO holders by voting power
-    uint256[52] public NFT_IDS = [
+    uint256[70] public NFT_IDS = [
         uint256(6), 7, 47, 48, 12, 2, 3, 4, 5, 10,
         15, 20, 25, 30, 35, 40, 50, 55, 60, 65,
         70, 75, 80, 85, 90, 95, 100, 110, 120, 130,
         140, 150, 160, 170, 180, 190, 200, 220, 240, 260,
         280, 300, 350, 400, 450, 500, 600, 700, 800, 900,
-        1000, 1100
+        1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900,
+        2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900
     ];
 
     // ============ STATE ============
@@ -83,7 +84,7 @@ contract ComprehensiveForkTest is Test {
 
         vm.startPrank(admin);
         projectToken.approve(address(factory), 10_000_000 ether);
-        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether));
+        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether, 0));
         vm.stopPrank();
     }
 
@@ -239,104 +240,96 @@ contract ComprehensiveForkTest is Test {
     }
 
     function _phase5_ClaimRealRewards() internal {
-        console.log("PHASE 5: REAL CLAIM REWARDS (BRIBES & FEES)");
-        console.log("--------------------------------------------");
+        console.log("PHASE 5: CHECK PENDING REWARDS (before finalization)");
+        console.log("-----------------------------------------------------");
 
-        address gaugeAddr = pool.gauge();
-        console.log("Gauge:", gaugeAddr);
-        
-        address internalBribe = voter.internal_bribes(gaugeAddr);
-        address externalBribe = voter.external_bribes(gaugeAddr);
-        
-        console.log("Internal Bribe:", internalBribe);
-        console.log("External Bribe:", externalBribe);
+        // Get reward contracts dynamically
+        (address feesReward, address bribeReward) = pool.getRewardContracts();
+        console.log("Fees Reward (LP fees):", feesReward);
+        console.log("Bribe Reward (external):", bribeReward);
 
-        // Balances BEFORE claim
+        // Balances BEFORE
         uint256 aeroBalBefore = IERC20(AERO).balanceOf(address(pool));
         uint256 wethBalBefore = IERC20(WETH).balanceOf(address(pool));
         uint256 usdcBalBefore = IERC20(USDC).balanceOf(address(pool));
 
         console.log("");
-        console.log("Pool balances BEFORE claim:");
+        console.log("Pool balances BEFORE finalization:");
         console.log("  AERO:", aeroBalBefore / 1e18);
         console.log("  WETH:", wethBalBefore / 1e18);
         console.log("  USDC:", usdcBalBefore / 1e6);
 
-        // Prepare arrays for claim
-        address[] memory bribes = new address[](2);
-        bribes[0] = internalBribe;
-        bribes[1] = externalBribe;
-
+        // Check pending rewards (first 5 NFTs)
+        console.log("");
+        console.log("Pending rewards (sample of 5 NFTs):");
+        
         address[] memory tokens = new address[](3);
         tokens[0] = AERO;
         tokens[1] = WETH;
         tokens[2] = USDC;
-
-        address[][] memory tokenArrays = new address[][](2);
-        tokenArrays[0] = tokens;
-        tokenArrays[1] = tokens;
-
-        console.log("");
-        console.log("Claiming rewards for each NFT...");
-
-        uint256 claimSuccessCount = 0;
-        uint256 claimFailCount = 0;
-
-        // Claim rewards for each locked NFT
-        // Pool owns NFTs, so we call voter directly
-        for (uint256 i = 0; i < lockedNftIds.length; i++) {
+        
+        for (uint256 i = 0; i < lockedNftIds.length && i < 5; i++) {
             uint256 tokenId = lockedNftIds[i];
+            console.log("  NFT #%d:", tokenId);
             
-            // Try claim bribes
-            try voter.claimBribes(bribes, tokenArrays, tokenId) {
-                claimSuccessCount++;
-            } catch {
-                claimFailCount++;
-            }
-            
-            // Try claim fees
-            try voter.claimFees(bribes, tokenArrays, tokenId) {
-                // success
-            } catch {
-                // ignore
+            for (uint256 j = 0; j < tokens.length; j++) {
+                // Check fees
+                if (feesReward != address(0)) {
+                    try IVotingReward(feesReward).earned(tokens[j], tokenId) returns (uint256 earned) {
+                        if (earned > 0) {
+                            console.log("    [FEES] %s: %s", tokens[j], earned);
+                        }
+                    } catch {}
+                }
+                // Check bribes  
+                if (bribeReward != address(0)) {
+                    try IVotingReward(bribeReward).earned(tokens[j], tokenId) returns (uint256 earned) {
+                        if (earned > 0) {
+                            console.log("    [BRIBE] %s: %s", tokens[j], earned);
+                        }
+                    } catch {}
+                }
             }
         }
+        
+        console.log("");
+        console.log("NOTE: Rewards will be claimed in finalizeEpoch()");
+        console.log("");
+    }
 
-        console.log("  Successful claims:", claimSuccessCount);
-        console.log("  Failed claims:", claimFailCount);
+    function _phase6_Finalize() internal {
+        console.log("PHASE 6: FINALIZE (CLAIM + SWAP + LIQUIDITY)");
+        console.log("---------------------------------------------");
 
-        // Balances AFTER claim
+        // Balances BEFORE
+        uint256 aeroBalBefore = IERC20(AERO).balanceOf(address(pool));
+        uint256 wethBalBefore = IERC20(WETH).balanceOf(address(pool));
+        uint256 usdcBalBefore = IERC20(USDC).balanceOf(address(pool));
+
+        console.log("");
+        console.log("Calling finalizeEpoch() with auto token discovery...");
+        console.log("  (This will: discover tokens -> claim rewards -> swap to WETH -> add liquidity)");
+        
+        vm.prank(admin);
+        pool.finalizeEpoch();
+
+        // Balances AFTER (before LP creation, so WETH was converted to LP)
         uint256 aeroBalAfter = IERC20(AERO).balanceOf(address(pool));
         uint256 wethBalAfter = IERC20(WETH).balanceOf(address(pool));
         uint256 usdcBalAfter = IERC20(USDC).balanceOf(address(pool));
 
         console.log("");
-        console.log("Pool balances AFTER claim:");
-        console.log("  AERO:", aeroBalAfter / 1e18);
-        console.log("  WETH:", wethBalAfter / 1e18);
-        console.log("  USDC:", usdcBalAfter / 1e6);
-
-        console.log("");
-        console.log("REWARDS COLLECTED:");
-        console.log("  AERO:", (aeroBalAfter - aeroBalBefore) / 1e18);
-        console.log("  WETH:", (wethBalAfter - wethBalBefore) / 1e18);
-        console.log("  USDC:", (usdcBalAfter - usdcBalBefore) / 1e6);
-        console.log("");
-    }
-
-    function _phase6_Finalize() internal {
-        console.log("PHASE 6: FINALIZE (SWAP + LIQUIDITY)");
-        console.log("-------------------------------------");
-
-        console.log("");
-        console.log("Calling finalizeEpoch() with auto token discovery...");
-        
-        vm.prank(admin);
-        pool.finalizeEpoch();
+        console.log("REWARDS CLAIMED (raw, before swaps):");
+        if (aeroBalAfter > aeroBalBefore) {
+            console.log("  AERO remaining:", (aeroBalAfter - aeroBalBefore) / 1e18);
+        }
+        if (usdcBalAfter > usdcBalBefore) {
+            console.log("  USDC remaining:", (usdcBalAfter - usdcBalBefore) / 1e6);
+        }
 
         console.log("");
         console.log("FINALIZATION RESULTS:");
-        console.log("  WETH collected:", pool.wethCollected() / 1e18, "WETH");
+        console.log("  WETH collected (total):", pool.wethCollected() / 1e18, "WETH");
         console.log("  LP created:", pool.lpCreated() / 1e18, "LP");
         console.log("  LP token:", pool.lpToken());
         console.log("  Pool state:", uint256(pool.state()));
@@ -625,23 +618,83 @@ contract ComprehensiveForkTest is Test {
 
         // Check auto-discovered reward tokens
         console.log("");
-        console.log("getAvailableRewardTokens():");
+        console.log("================================================================");
+        console.log("   PENDING REWARDS (before finalization)");
+        console.log("================================================================");
+        
         (address[] memory feesTokens, address[] memory bribeTokens) = pool.getAvailableRewardTokens();
-        console.log("  Fees tokens count:", feesTokens.length);
+        console.log("Fees tokens count:", feesTokens.length);
         for (uint256 i = 0; i < feesTokens.length && i < 5; i++) {
-            console.log("    -", feesTokens[i]);
+            console.log("  -", feesTokens[i]);
         }
-        console.log("  Bribe tokens count:", bribeTokens.length);
+        console.log("Bribe tokens count:", bribeTokens.length);
         for (uint256 i = 0; i < bribeTokens.length && i < 5; i++) {
-            console.log("    -", bribeTokens[i]);
+            console.log("  -", bribeTokens[i]);
         }
+        
+        // Log pending rewards per NFT
+        console.log("");
+        console.log("Pending rewards per NFT:");
+        for (uint256 i = 0; i < lockedNftIds.length; i++) {
+            uint256 tokenId = lockedNftIds[i];
+            console.log("  NFT #%d:", tokenId);
+            
+            // Check fees rewards
+            for (uint256 j = 0; j < feesTokens.length && j < 3; j++) {
+                try IVotingReward(feesAfter).earned(feesTokens[j], tokenId) returns (uint256 earned) {
+                    if (earned > 0) {
+                        console.log("    [FEES] %s: %s", feesTokens[j], earned);
+                    }
+                } catch {}
+            }
+            
+            // Check bribe rewards
+            for (uint256 j = 0; j < bribeTokens.length && j < 3; j++) {
+                try IVotingReward(bribeAfter).earned(bribeTokens[j], tokenId) returns (uint256 earned) {
+                    if (earned > 0) {
+                        console.log("    [BRIBE] %s: %s", bribeTokens[j], earned);
+                    }
+                } catch {}
+            }
+        }
+
+        // Collect balances BEFORE finalization
+        console.log("");
+        console.log("================================================================");
+        console.log("   BALANCES BEFORE FINALIZATION");
+        console.log("================================================================");
+        uint256 aeroBalBefore = IERC20(AERO).balanceOf(address(pool));
+        uint256 wethBalBefore = IERC20(WETH).balanceOf(address(pool));
+        uint256 usdcBalBefore = IERC20(USDC).balanceOf(address(pool));
+        console.log("  Pool AERO:", aeroBalBefore / 1e18);
+        console.log("  Pool WETH:", wethBalBefore / 1e18);
+        console.log("  Pool USDC:", usdcBalBefore / 1e6);
 
         // Finalize with auto token discovery
         console.log("");
-        console.log("Calling finalizeEpoch() - auto-discovering reward tokens...");
+        console.log("================================================================");
+        console.log("   CALLING finalizeEpoch() - auto token discovery");
+        console.log("================================================================");
         vm.prank(admin);
         pool.finalizeEpoch();
 
+        // Collect balances AFTER finalization
+        console.log("");
+        console.log("================================================================");
+        console.log("   BALANCES AFTER FINALIZATION");
+        console.log("================================================================");
+        uint256 aeroBalAfterFinalize = IERC20(AERO).balanceOf(address(pool));
+        uint256 wethBalAfterFinalize = IERC20(WETH).balanceOf(address(pool));
+        uint256 usdcBalAfterFinalize = IERC20(USDC).balanceOf(address(pool));
+        console.log("  Pool AERO:", aeroBalAfterFinalize / 1e18);
+        console.log("  Pool WETH (after swaps):", wethBalAfterFinalize / 1e18);
+        console.log("  Pool USDC:", usdcBalAfterFinalize / 1e6);
+        
+        console.log("");
+        console.log("REWARDS CLAIMED:");
+        console.log("  AERO claimed:", (aeroBalAfterFinalize > aeroBalBefore ? aeroBalAfterFinalize - aeroBalBefore : 0) / 1e18);
+        console.log("  (AERO was swapped to WETH)");
+        
         console.log("");
         console.log("FINALIZATION RESULT:");
         console.log("  WETH collected:", pool.wethCollected() / 1e18);
@@ -721,6 +774,328 @@ contract ComprehensiveForkTest is Test {
         console.log("  Project tokens claimed:", totalClaimed / 1e18);
         console.log("  Pool state:", uint256(pool.state()));
         console.log("================================================================");
+    }
+
+    /// @notice Quick test with 5 NFTs and BATCH finalization
+    function test_QuickBatchFinalization() public {
+        if (block.chainid != 8453) { vm.skip(true); return; }
+
+        console.log("");
+        console.log("================================================================");
+        console.log("   QUICK BATCH FINALIZATION TEST (5 NFTs)");
+        console.log("================================================================");
+
+        // Activate pool
+        vm.prank(admin);
+        pool.activate();
+        console.log("Pool activated");
+
+        // Lock 5 NFTs
+        uint256 epochStart = (block.timestamp / 1 weeks) * 1 weeks;
+        
+        for (uint256 i = 0; i < 5; i++) {
+            uint256 tokenId = NFT_IDS[i];
+            
+            address owner;
+            try ve.ownerOf(tokenId) returns (address _owner) {
+                owner = _owner;
+            } catch { continue; }
+            
+            if (owner == address(0)) continue;
+            
+            uint256 vp = ve.balanceOfNFT(tokenId);
+            if (vp == 0) continue;
+            
+            uint256 lastVoted = voter.lastVoted(tokenId);
+            if (lastVoted > epochStart) continue;
+            
+            vm.startPrank(owner);
+            ve.approve(address(pool), tokenId);
+            try pool.lockVeAERO(tokenId) {
+                lockedNftIds.push(tokenId);
+                lockedOwners.push(owner);
+                totalLockedVP += vp;
+                console.log("NFT #%d locked, VP: %s", tokenId, vp / 1e18);
+            } catch {}
+            vm.stopPrank();
+        }
+
+        require(lockedNftIds.length >= 1, "Need at least 1 NFT");
+        console.log("");
+        console.log("TOTAL LOCKED: %d NFTs, %s veAERO", lockedNftIds.length, totalLockedVP / 1e18);
+
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 12);
+
+        // Cast votes
+        console.log("");
+        console.log("Casting votes...");
+        vm.prank(admin);
+        pool.castVotes(WETH_AERO_GAUGE);
+        console.log("Votes cast for gauge:", WETH_AERO_GAUGE);
+
+        // Advance to next epoch
+        uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks + 1 hours;
+        vm.warp(nextEpochStart);
+        vm.roll(block.number + 50400);
+        console.log("New epoch:", block.timestamp / 1 weeks);
+
+        // Check pending rewards
+        console.log("");
+        console.log("================================================================");
+        console.log("   PENDING REWARDS");
+        console.log("================================================================");
+        
+        (address[] memory feesTokens, address[] memory bribeTokens) = pool.getAvailableRewardTokens();
+        console.log("Fees tokens: %d", feesTokens.length);
+        console.log("Bribe tokens: %d", bribeTokens.length);
+
+        // Balances BEFORE
+        uint256 aeroBalBefore = IERC20(AERO).balanceOf(address(pool));
+        uint256 wethBalBefore = IERC20(WETH).balanceOf(address(pool));
+        console.log("Pool balances before:");
+        console.log("  AERO: %s", aeroBalBefore / 1e18);
+        console.log("  WETH: %s", wethBalBefore / 1e18);
+
+        // BATCH FINALIZATION (batchSize = 2 to test multiple batches)
+        console.log("");
+        console.log("================================================================");
+        console.log("   BATCH FINALIZATION (batchSize=2)");
+        console.log("================================================================");
+        
+        uint256 batchSize = 2;
+        
+        // Step 1: Start batch
+        console.log("Step 1: startClaimRewardsBatch(%d)", batchSize);
+        vm.prank(admin);
+        pool.startClaimRewardsBatch(batchSize);
+        
+        (KickoffVoteSalePool.FinalizeStep step, uint256 progress, uint256 total, bool inProgress) = pool.getFinalizeProgress();
+        console.log("  Step: %d, Progress: %d/%d, InProgress:", uint256(step), progress, total);
+        console.log("    ", inProgress);
+        
+        // Step 2: Continue until done
+        uint256 batchCount = 1;
+        while (inProgress && step == KickoffVoteSalePool.FinalizeStep.ClaimingRewards) {
+            batchCount++;
+            console.log("Step 2: continueClaimRewardsBatch (batch #%d)", batchCount);
+            vm.prank(admin);
+            pool.continueClaimRewardsBatch(batchSize);
+            
+            (step, progress, total, inProgress) = pool.getFinalizeProgress();
+            console.log("  Step: %d, Progress: %d/%d", uint256(step), progress, total);
+        }
+        
+        // Balances after claiming
+        uint256 aeroBalAfterClaim = IERC20(AERO).balanceOf(address(pool));
+        uint256 wethBalAfterClaim = IERC20(WETH).balanceOf(address(pool));
+        console.log("");
+        console.log("Pool balances after claiming:");
+        console.log("  AERO: %s (claimed: %s)", aeroBalAfterClaim / 1e18, (aeroBalAfterClaim - aeroBalBefore) / 1e18);
+        console.log("  WETH: %s (claimed: %s)", wethBalAfterClaim / 1e18, (wethBalAfterClaim - wethBalBefore) / 1e18);
+
+        // Step 3: Complete finalization
+        console.log("");
+        console.log("Step 3: completeFinalization()");
+        vm.prank(admin);
+        pool.completeFinalization();
+        
+        console.log("");
+        console.log("================================================================");
+        console.log("   RESULTS");
+        console.log("================================================================");
+        console.log("  WETH collected: %s", pool.wethCollected() / 1e18);
+        console.log("  LP created: %s", pool.lpCreated() / 1e18);
+        console.log("  Pool state: %d (4 = Completed)", uint256(pool.state()));
+        console.log("  Batch operations: %d", batchCount + 1);
+
+        // Verify
+        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
+        
+        console.log("");
+        console.log("TEST PASSED!");
+    }
+
+    /// @notice Test with 60 NFTs and BATCH finalization
+    function test_BatchFinalizationWith60Holders() public {
+        if (block.chainid != 8453) { vm.skip(true); return; }
+
+        console.log("");
+        console.log("================================================================");
+        console.log("   BATCH FINALIZATION TEST WITH 60 HOLDERS");
+        console.log("================================================================");
+        console.log("Block:", block.number);
+        console.log("Timestamp:", block.timestamp);
+        console.log("");
+
+        // Activate pool
+        vm.prank(admin);
+        pool.activate();
+        console.log("Pool activated");
+
+        // Lock 60 NFTs
+        uint256 epochStart = (block.timestamp / 1 weeks) * 1 weeks;
+        uint256 targetCount = 60;
+        
+        console.log("");
+        console.log("Locking NFTs (target: 60)...");
+        
+        for (uint256 i = 0; i < NFT_IDS.length && lockedNftIds.length < targetCount; i++) {
+            uint256 tokenId = NFT_IDS[i];
+            
+            address owner;
+            try ve.ownerOf(tokenId) returns (address _owner) {
+                owner = _owner;
+            } catch { continue; }
+            
+            if (owner == address(0)) continue;
+            
+            uint256 vp = ve.balanceOfNFT(tokenId);
+            if (vp == 0) continue;
+            
+            uint256 lastVoted = voter.lastVoted(tokenId);
+            if (lastVoted > epochStart) continue;
+            
+            vm.startPrank(owner);
+            ve.approve(address(pool), tokenId);
+            try pool.lockVeAERO(tokenId) {
+                lockedNftIds.push(tokenId);
+                lockedOwners.push(owner);
+                totalLockedVP += vp;
+                
+                if (lockedNftIds.length % 10 == 0) {
+                    console.log("  Locked %d NFTs...", lockedNftIds.length);
+                }
+            } catch {}
+            vm.stopPrank();
+        }
+
+        console.log("");
+        console.log("TOTAL LOCKED: %d NFTs", lockedNftIds.length);
+        console.log("  Voting Power: %s veAERO", totalLockedVP / 1e18);
+        
+        require(lockedNftIds.length >= 10, "Need at least 10 NFTs for batch test");
+
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 12);
+
+        // Cast votes using batch
+        console.log("");
+        console.log("================================================================");
+        console.log("   CASTING VOTES (batch)");
+        console.log("================================================================");
+        
+        vm.prank(admin);
+        pool.castVotes(WETH_AERO_GAUGE);
+        console.log("Votes cast for gauge:", WETH_AERO_GAUGE);
+
+        // Advance to next epoch
+        console.log("");
+        console.log("================================================================");
+        console.log("   ADVANCING TO NEXT EPOCH");
+        console.log("================================================================");
+        
+        uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks + 1 hours;
+        vm.warp(nextEpochStart);
+        vm.roll(block.number + 50400);
+        console.log("New epoch:", block.timestamp / 1 weeks);
+
+        // Check pending rewards
+        console.log("");
+        console.log("================================================================");
+        console.log("   PENDING REWARDS (before batch finalization)");
+        console.log("================================================================");
+        
+        (address[] memory feesTokens, address[] memory bribeTokens) = pool.getAvailableRewardTokens();
+        console.log("Fees tokens: %d", feesTokens.length);
+        console.log("Bribe tokens: %d", bribeTokens.length);
+
+        // Balances BEFORE
+        uint256 aeroBalBefore = IERC20(AERO).balanceOf(address(pool));
+        uint256 wethBalBefore = IERC20(WETH).balanceOf(address(pool));
+        console.log("");
+        console.log("Pool balances before:");
+        console.log("  AERO: %s", aeroBalBefore / 1e18);
+        console.log("  WETH: %s", wethBalBefore / 1e18);
+
+        // BATCH FINALIZATION
+        console.log("");
+        console.log("================================================================");
+        console.log("   BATCH FINALIZATION");
+        console.log("================================================================");
+        
+        uint256 batchSize = 20;
+        
+        // Step 1: Start batch claiming
+        console.log("");
+        console.log("Step 1: startClaimRewardsBatch(%d)", batchSize);
+        vm.prank(admin);
+        pool.startClaimRewardsBatch(batchSize);
+        
+        (KickoffVoteSalePool.FinalizeStep step, uint256 progress, uint256 total, bool inProgress) = pool.getFinalizeProgress();
+        console.log("  Step: %d, Progress: %d/%d", uint256(step), progress, total);
+        
+        // Step 2: Continue batch claiming until done
+        uint256 batchCount = 1;
+        while (inProgress && step == KickoffVoteSalePool.FinalizeStep.ClaimingRewards) {
+            batchCount++;
+            console.log("");
+            console.log("Step 2: continueClaimRewardsBatch (batch #%d)", batchCount);
+            vm.prank(admin);
+            pool.continueClaimRewardsBatch(batchSize);
+            
+            (step, progress, total, inProgress) = pool.getFinalizeProgress();
+            console.log("  Step: %d, Progress: %d/%d", uint256(step), progress, total);
+        }
+        
+        // Balances after claiming
+        uint256 aeroBalAfterClaim = IERC20(AERO).balanceOf(address(pool));
+        uint256 wethBalAfterClaim = IERC20(WETH).balanceOf(address(pool));
+        console.log("");
+        console.log("Pool balances after claiming:");
+        console.log("  AERO: %s (claimed: %s)", aeroBalAfterClaim / 1e18, (aeroBalAfterClaim - aeroBalBefore) / 1e18);
+        console.log("  WETH: %s (claimed: %s)", wethBalAfterClaim / 1e18, (wethBalAfterClaim - wethBalBefore) / 1e18);
+
+        // Step 3: Complete finalization (convert to WETH + add liquidity)
+        console.log("");
+        console.log("Step 3: completeFinalization()");
+        vm.prank(admin);
+        pool.completeFinalization();
+        
+        console.log("");
+        console.log("================================================================");
+        console.log("   FINALIZATION RESULTS");
+        console.log("================================================================");
+        console.log("  WETH collected: %s", pool.wethCollected() / 1e18);
+        console.log("  LP created: %s", pool.lpCreated() / 1e18);
+        console.log("  Pool state: %d (4 = Completed)", uint256(pool.state()));
+        console.log("  Total batch operations: %d", batchCount + 1);
+
+        // Verify state
+        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
+        
+        // Unlock and claim (sample)
+        console.log("");
+        console.log("================================================================");
+        console.log("   UNLOCKING NFTs (sample of 5)");
+        console.log("================================================================");
+        
+        for (uint256 i = 0; i < lockedNftIds.length && i < 5; i++) {
+            uint256 tokenId = lockedNftIds[i];
+            (address nftOwner, , ) = pool.getLockedNFTInfo(tokenId);
+            
+            vm.prank(nftOwner);
+            pool.unlockVeAERO(tokenId);
+            console.log("  NFT #%d unlocked", tokenId);
+        }
+
+        console.log("");
+        console.log("================================================================");
+        console.log("   TEST COMPLETED SUCCESSFULLY!");
+        console.log("================================================================");
+        console.log("  Total NFTs locked: %d", lockedNftIds.length);
+        console.log("  Total voting power: %s veAERO", pool.totalVotingPower() / 1e18);
+        console.log("  Batch operations: %d", batchCount + 1);
     }
     
     /// @notice Check earned rewards on bribe contracts

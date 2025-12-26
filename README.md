@@ -138,7 +138,8 @@ forge script script/Deploy.s.sol:Deploy \
 
 1. **Create Pool**
    ```solidity
-   factory.createPool(projectToken, projectOwner, totalAllocation)
+   // minVotingPower: minimum veAERO voting power required to lock (0 = no minimum)
+   factory.createPool(projectToken, projectOwner, totalAllocation, minVotingPower)
    ```
 
 2. **Activate Pool**
