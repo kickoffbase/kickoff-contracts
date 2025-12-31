@@ -335,8 +335,16 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Start or continue casting votes in batches
     /// @param _gauge The Aerodrome gauge to vote for (only used on first call)
     /// @param batchSize Number of NFTs to process in this batch (max MAX_BATCH_SIZE)
-    /// @dev Call multiple times until isVotingComplete() returns true
-    function castVotesBatch(address _gauge, uint256 batchSize) external onlyAdmin inState(PoolState.Active) {
+    /// @dev Call multiple times until getVotingProgress().inProgress returns false
+    /// @dev State changes to Voting on first batch, blocking further NFT locks
+    function castVotesBatch(address _gauge, uint256 batchSize) external onlyAdmin {
+        // First batch requires Active state, subsequent batches require Voting state with batch in progress
+        if (!batchInProgress) {
+            if (state != PoolState.Active) revert InvalidState();
+        } else {
+            if (state != PoolState.Voting) revert InvalidState();
+        }
+        
         if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
         
         uint256 length = lockedTokenIds.length;
@@ -346,7 +354,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
             return;
         }
 
-        // First batch - initialize
+        // First batch - initialize and change state immediately
         if (!batchInProgress) {
             if (_gauge == address(0)) revert ZeroAddress();
             
@@ -362,6 +370,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
             
             batchIndex = 0;
             batchInProgress = true;
+            
+            // Change state to Voting immediately - this blocks further NFT locks
+            _setState(PoolState.Voting);
         }
 
         // Calculate end index
@@ -387,7 +398,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (batchIndex >= length) {
             batchInProgress = false;
             batchIndex = 0;
-            _setState(PoolState.Voting);
+            // State is already Voting
             emit VotesCast(gauge, totalVotingPower);
         }
     }
