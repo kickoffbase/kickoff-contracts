@@ -324,5 +324,5 @@ MIT
 ## Links
 
 - Website: https://www.kickoff.fun/
-- Documentation: [Coming Soon]
+- Documentation: https://www.kickoff.fun/docs
 - Aerodrome: https://aerodrome.finance
