@@ -64,6 +64,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error HasUnclaimedRewards();
     error NoParticipants();
     error InvalidDeadline();
+    error NotAllClaimed();
+    error EpochChanged();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -194,6 +196,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     
     /// @notice Number of users who have claimed
     uint256 public claimCount;
+    
+    /// @notice Number of unique participants (users with voting power > 0)
+    uint256 public participantCount;
 
     /// @notice Mapping of tokenId to locked NFT info
     mapping(uint256 => LockedNFT) public lockedNFTs;
@@ -243,6 +248,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Slippage tolerance for adding liquidity (in basis points)
     uint256 public liquiditySlippageBps = DEFAULT_SLIPPAGE_BPS;
+    
+    /// @notice Deadline buffer for swaps/liquidity operations (seconds)
+    /// @dev #6: Provides meaningful deadline protection
+    uint256 public deadlineBuffer = 20 minutes;
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -365,7 +374,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         lockedTokenIds.push(tokenId);
 
-        // Update user info
+        // Update user info - track new participants for FIND-002 fix
+        if (userInfo[msg.sender].totalVotingPower == 0) {
+            participantCount++; // New participant
+        }
         userInfo[msg.sender].totalVotingPower += votingPowerAmount;
 
         // Update total voting power
@@ -443,6 +455,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
             emit VotesCast(gauge, totalVotingPower);
             return;
         }
+        
+        // #12: Ensure we're still in the same Aerodrome epoch
+        uint256 currentEpochStart = EpochLib.currentEpochStart();
+        if (currentEpochStart != aerodromeEpochStart) revert EpochChanged();
 
         // Calculate end index
         uint256 endIndex = batchIndex + batchSize;
@@ -591,7 +607,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         
         // #10: Ensure Aerodrome epoch has ended
         uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
-        if (block.timestamp < aerodromeEpochEnd) revert EpochNotEnded();
+        if (block.timestamp <= aerodromeEpochEnd) revert EpochNotEnded();
         
         _setState(PoolState.Finalizing);
         finalizeStep = FinalizeStep.ClaimingRewards;
@@ -738,7 +754,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // #10: Ensure Aerodrome epoch has ended (not just Kickoff epoch)
         // Use stored aerodromeEpochStart + 1 week to get Aerodrome epoch end
         uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
-        if (block.timestamp < aerodromeEpochEnd) revert EpochNotEnded();
+        if (block.timestamp <= aerodromeEpochEnd) revert EpochNotEnded();
         
         _setState(PoolState.Finalizing);
 
@@ -976,14 +992,16 @@ contract KickoffVoteSalePool is IERC721Receiver {
                 uint256 minOut = _getMinOutputWithSlippage(balance, routes);
                 
                 // Skip swap if no reliable quote (minOut == 0)
+                // #6: Use deadline buffer for meaningful deadline protection
+                uint256 deadline = block.timestamp + deadlineBuffer;
                 if (minOut > 0) {
-                    try router.swapExactTokensForTokens(balance, minOut, routes, address(this), block.timestamp) {}
+                    try router.swapExactTokensForTokens(balance, minOut, routes, address(this), deadline) {}
                     catch {
                         // Try stable route with slippage
                         routes[0].stable = true;
                         minOut = _getMinOutputWithSlippage(balance, routes);
                         if (minOut > 0) {
-                            try router.swapExactTokensForTokens(balance, minOut, routes, address(this), block.timestamp) {}
+                            try router.swapExactTokensForTokens(balance, minOut, routes, address(this), deadline) {}
                             catch {
                                 // Token stays on contract for manual rescue
                             }
@@ -1038,6 +1056,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         uint256 minWeth = (wethToUse * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
 
         // #6: Try to add liquidity - handle pre-existing pool with hostile ratios
+        // FIND-006: Use deadline buffer for meaningful deadline protection
         try router.addLiquidity(
             projectToken,
             wethAddr,
@@ -1047,7 +1066,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
             minProjectToken,
             minWeth,
             address(this),
-            block.timestamp
+            block.timestamp + deadlineBuffer
         ) returns (uint256, uint256, uint256 liquidity) {
             lpCreated = liquidity;
             
@@ -1145,9 +1164,13 @@ contract KickoffVoteSalePool is IERC721Receiver {
         return (saleAllocation * info.totalVotingPower) / totalVotingPower;
     }
     
-    /// @notice Claim remaining project token dust after all claims
-    /// @dev #13: Allows admin to recover any remaining dust to project owner
+    /// @notice Claim remaining project token dust after ALL users have claimed
+    /// @dev #13: Only callable after all participants have claimed their tokens
+    /// @dev FIND-002/017: Ensures dust cannot be claimed before all users get their share
     function claimDust() external onlyAdmin inState(PoolState.Completed) {
+        // FIND-002: Ensure all participants have claimed before allowing dust collection
+        if (claimCount < participantCount) revert NotAllClaimed();
+        
         uint256 balance = IERC20(projectToken).balanceOf(address(this));
         if (balance > 0) {
             IERC20(projectToken).transfer(projectOwner, balance);
@@ -1342,6 +1365,14 @@ contract KickoffVoteSalePool is IERC721Receiver {
     function setLiquiditySlippage(uint256 _slippageBps) external onlyAdmin {
         if (_slippageBps > 5000) revert SlippageExceeded(); // Max 50%
         liquiditySlippageBps = _slippageBps;
+    }
+    
+    /// @notice Set deadline buffer for swap/liquidity operations
+    /// @dev FIND-006: Provides meaningful deadline protection
+    /// @param _buffer Buffer in seconds (max 1 hour)
+    function setDeadlineBuffer(uint256 _buffer) external onlyAdmin {
+        if (_buffer > 1 hours) revert InvalidDeadline();
+        deadlineBuffer = _buffer;
     }
 
     /*//////////////////////////////////////////////////////////////
