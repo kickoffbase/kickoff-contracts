@@ -15,6 +15,7 @@ contract KickoffFactory {
 
     error ZeroAddress();
     error ZeroAmount();
+    error ZeroVotingPower();
     error NotOwner();
     error PoolAlreadyExists();
     error TransferFailed();
@@ -103,30 +104,38 @@ contract KickoffFactory {
     /// @param projectToken The project's ERC20 token address
     /// @param projectOwner The project owner address (receives 70% of trading fees)
     /// @param totalAllocation Total amount of project tokens (split 50/50: sale + liquidity)
-    /// @param minVotingPower Minimum voting power required to lock veAERO NFT (0 = no minimum)
+    /// @param minVotingPower Minimum voting power required to lock veAERO NFT (must be > 0)
+    /// @param poolAdmin The admin of the pool (receives 30% of trading fees)
     /// @return pool The address of the created pool
     function createPool(
         address projectToken,
         address projectOwner,
         uint256 totalAllocation,
-        uint256 minVotingPower
+        uint256 minVotingPower,
+        address poolAdmin
     ) external returns (address pool) {
-        if (projectToken == address(0) || projectOwner == address(0)) {
+        // #5: Restrict createPool to owner to prevent front-running
+        if (msg.sender != owner) revert NotOwner();
+        
+        if (projectToken == address(0) || projectOwner == address(0) || poolAdmin == address(0)) {
             revert ZeroAddress();
         }
         if (totalAllocation == 0) {
             revert ZeroAmount();
+        }
+        // #1: Enforce non-zero minVotingPower to prevent DoS via zero-VP NFTs
+        if (minVotingPower == 0) {
+            revert ZeroVotingPower();
         }
         if (poolByToken[projectToken] != address(0)) {
             revert PoolAlreadyExists();
         }
 
         // Deploy new pool
-        // msg.sender becomes the admin (receives 30% of trading fees)
         pool = address(
             new KickoffVoteSalePool(
                 projectToken,
-                msg.sender, // admin
+                poolAdmin, // admin (receives 30% of trading fees)
                 projectOwner,
                 totalAllocation,
                 minVotingPower,
@@ -138,10 +147,10 @@ contract KickoffFactory {
             )
         );
 
-        // Transfer project tokens from admin to pool
+        // Transfer project tokens from pool admin to pool
         // Check balance before and after to handle fee-on-transfer tokens
         uint256 balanceBefore = IERC20(projectToken).balanceOf(pool);
-        bool success = IERC20(projectToken).transferFrom(msg.sender, pool, totalAllocation);
+        bool success = IERC20(projectToken).transferFrom(poolAdmin, pool, totalAllocation);
         if (!success) revert TransferFailed();
         uint256 balanceAfter = IERC20(projectToken).balanceOf(pool);
         if (balanceAfter - balanceBefore != totalAllocation) revert InsufficientTokensReceived();
@@ -151,7 +160,7 @@ contract KickoffFactory {
         poolByToken[projectToken] = pool;
         isPool[pool] = true;
 
-        emit PoolCreated(pool, projectToken, msg.sender, projectOwner, totalAllocation);
+        emit PoolCreated(pool, projectToken, poolAdmin, projectOwner, totalAllocation);
     }
 
     /*//////////////////////////////////////////////////////////////

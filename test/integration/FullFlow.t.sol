@@ -49,17 +49,18 @@ contract FullFlowTest is Test {
         projectToken = address(new MockProjectToken());
         MockProjectToken(projectToken).mint(admin, TOTAL_ALLOCATION);
 
-        // Deploy factory
-        vm.prank(admin);
+        // Deploy factory (this contract becomes owner)
         factory = new KickoffFactory(VOTING_ESCROW, VOTER, ROUTER, WETH);
         lpLocker = factory.lpLocker();
 
-        // Create pool
-        vm.startPrank(admin);
+        // Admin approves tokens
+        vm.prank(admin);
         IERC20(projectToken).approve(address(factory), TOTAL_ALLOCATION);
-        address poolAddr = factory.createPool(projectToken, projectOwner, TOTAL_ALLOCATION, 0);
+        
+        // Factory owner creates pool, admin becomes pool admin
+        // #1: minVotingPower must be > 0
+        address poolAddr = factory.createPool(projectToken, projectOwner, TOTAL_ALLOCATION, 1 ether, admin);
         pool = KickoffVoteSalePool(poolAddr);
-        vm.stopPrank();
     }
 
     /// @notice Test factory deployment on fork

@@ -55,6 +55,20 @@ contract LPLocker {
         address token1,
         uint256 amount1
     );
+    
+    event FeesAccrued(
+        address indexed votePool,
+        address token,
+        uint256 adminAmount,
+        uint256 projectAmount
+    );
+    
+    event FeesWithdrawn(
+        address indexed votePool,
+        address indexed recipient,
+        address token,
+        uint256 amount
+    );
 
     /*//////////////////////////////////////////////////////////////
                                  STRUCTS
@@ -68,6 +82,12 @@ contract LPLocker {
         address projectOwner; // Receives 70% of trading fees
         uint256 totalLP; // Total LP locked (forever)
         bool exists; // Whether this pool exists
+    }
+    
+    /// @notice Accrued fees for pull-based withdrawal (#18)
+    struct AccruedFees {
+        uint256 adminBalance;
+        uint256 projectBalance;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -88,6 +108,10 @@ contract LPLocker {
 
     /// @notice Array of all vote pools with locked LP
     address[] public allVotePools;
+    
+    /// @notice #18: Accrued fees per votePool per token (pull-based)
+    /// @dev votePool => token => AccruedFees
+    mapping(address => mapping(address => AccruedFees)) public accruedFees;
 
     /*//////////////////////////////////////////////////////////////
                             LOCK FUNCTIONS
@@ -133,56 +157,97 @@ contract LPLocker {
                         CLAIM TRADING FEES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Claim trading fees for a vote pool
-    /// @dev Can be called by either admin (gets 30%) or project owner (gets 70%)
+    /// @notice Claim and accrue trading fees from Aerodrome pool
+    /// @dev #18: Pull-based - fees are accrued internally, then withdrawn separately
     /// @param votePool The vote pool address
     function claimTradingFees(address votePool) external nonReentrant {
         LockedLP storage pool = lockedPools[votePool];
 
         if (!pool.exists) revert PoolNotFound();
-        if (msg.sender != pool.admin && msg.sender != pool.projectOwner) {
-            revert NotAuthorized();
-        }
 
         // Get token addresses
         address token0 = IPool(pool.aerodromePool).token0();
         address token1 = IPool(pool.aerodromePool).token1();
 
         // Claim fees from Aerodrome pool
-        // Note: In Aerodrome, LP holders earn fees proportionally
-        // We need to call claimFees on the pool contract
         (uint256 claimed0, uint256 claimed1) = IPool(pool.aerodromePool).claimFees();
 
-        // Calculate shares
-        uint256 adminShare0 = (claimed0 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
-        uint256 adminShare1 = (claimed1 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
-        uint256 projectShare0 = claimed0 - adminShare0;
-        uint256 projectShare1 = claimed1 - adminShare1;
-
-        // Transfer to admin
-        if (adminShare0 > 0) {
-            if (!IERC20(token0).transfer(pool.admin, adminShare0)) revert TransferFailed();
+        // Calculate and accrue shares
+        if (claimed0 > 0) {
+            uint256 adminShare0 = (claimed0 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
+            uint256 projectShare0 = claimed0 - adminShare0;
+            accruedFees[votePool][token0].adminBalance += adminShare0;
+            accruedFees[votePool][token0].projectBalance += projectShare0;
+            emit FeesAccrued(votePool, token0, adminShare0, projectShare0);
         }
-        if (adminShare1 > 0) {
-            if (!IERC20(token1).transfer(pool.admin, adminShare1)) revert TransferFailed();
-        }
-
-        // Transfer to project owner
-        if (projectShare0 > 0) {
-            if (!IERC20(token0).transfer(pool.projectOwner, projectShare0)) revert TransferFailed();
-        }
-        if (projectShare1 > 0) {
-            if (!IERC20(token1).transfer(pool.projectOwner, projectShare1)) revert TransferFailed();
+        
+        if (claimed1 > 0) {
+            uint256 adminShare1 = (claimed1 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
+            uint256 projectShare1 = claimed1 - adminShare1;
+            accruedFees[votePool][token1].adminBalance += adminShare1;
+            accruedFees[votePool][token1].projectBalance += projectShare1;
+            emit FeesAccrued(votePool, token1, adminShare1, projectShare1);
         }
 
         emit TradingFeesClaimed(votePool, msg.sender, token0, claimed0, token1, claimed1);
+    }
+    
+    /// @notice Withdraw accrued fees for admin
+    /// @dev #18: Pull-based withdrawal to any recipient address
+    /// @param votePool The vote pool address
+    /// @param token The token to withdraw
+    /// @param recipient The address to receive fees
+    function withdrawAdminFees(address votePool, address token, address recipient) external nonReentrant {
+        LockedLP storage pool = lockedPools[votePool];
+        if (!pool.exists) revert PoolNotFound();
+        if (msg.sender != pool.admin) revert NotAuthorized();
+        if (recipient == address(0)) revert ZeroAddress();
+        
+        uint256 amount = accruedFees[votePool][token].adminBalance;
+        if (amount == 0) revert ZeroAmount();
+        
+        accruedFees[votePool][token].adminBalance = 0;
+        
+        _safeTransfer(token, recipient, amount);
+        emit FeesWithdrawn(votePool, recipient, token, amount);
+    }
+    
+    /// @notice Withdraw accrued fees for project owner
+    /// @dev #18: Pull-based withdrawal to any recipient address
+    /// @param votePool The vote pool address
+    /// @param token The token to withdraw
+    /// @param recipient The address to receive fees
+    function withdrawProjectFees(address votePool, address token, address recipient) external nonReentrant {
+        LockedLP storage pool = lockedPools[votePool];
+        if (!pool.exists) revert PoolNotFound();
+        if (msg.sender != pool.projectOwner) revert NotAuthorized();
+        if (recipient == address(0)) revert ZeroAddress();
+        
+        uint256 amount = accruedFees[votePool][token].projectBalance;
+        if (amount == 0) revert ZeroAmount();
+        
+        accruedFees[votePool][token].projectBalance = 0;
+        
+        _safeTransfer(token, recipient, amount);
+        emit FeesWithdrawn(votePool, recipient, token, amount);
+    }
+    
+    /// @notice Safe transfer helper for non-standard tokens
+    /// @dev #15: Handles tokens that don't return bool on transfer
+    function _safeTransfer(address token, address to, uint256 amount) internal {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
+        );
+        if (!success || (data.length > 0 && !abi.decode(data, (bool)))) {
+            revert TransferFailed();
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
                           VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Get pending trading fees for a vote pool
+    /// @notice Get pending trading fees for a vote pool (not yet claimed from Aerodrome)
     /// @param votePool The vote pool address
     /// @return token0 The first token address
     /// @return amount0 Pending amount of token0
@@ -206,6 +271,21 @@ contract LPLocker {
         // Note: Actual claimable amounts may differ slightly
         amount0 = IPool(pool.aerodromePool).claimable0(address(this));
         amount1 = IPool(pool.aerodromePool).claimable1(address(this));
+    }
+    
+    /// @notice Get accrued (already claimed, awaiting withdrawal) fees for a vote pool
+    /// @dev #18: Shows fees that have been claimed from Aerodrome but not yet withdrawn
+    /// @param votePool The vote pool address
+    /// @param token The token address to check
+    /// @return adminBalance Accrued balance for admin
+    /// @return projectBalance Accrued balance for project owner
+    function getAccruedFees(address votePool, address token) 
+        external 
+        view 
+        returns (uint256 adminBalance, uint256 projectBalance) 
+    {
+        AccruedFees storage fees = accruedFees[votePool][token];
+        return (fees.adminBalance, fees.projectBalance);
     }
 
     /// @notice Get fee shares for admin and project owner

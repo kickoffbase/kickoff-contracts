@@ -22,15 +22,16 @@ contract KickoffFactoryTest is Test {
     address public weth = address(0x13);
 
     uint256 public constant TOTAL_ALLOCATION = 1_000_000 ether;
+    uint256 public constant MIN_VOTING_POWER = 1 ether; // #1: Must be > 0
 
     function setUp() public {
         // Deploy project token
         projectToken = new MockERC20("Project Token", "PROJECT", 18);
 
-        // Deploy factory
+        // Deploy factory (owner = address(this))
         factory = new KickoffFactory(votingEscrow, voter, router, weth);
 
-        // Mint tokens to admin
+        // Mint tokens to admin (pool admin)
         projectToken.mint(admin, TOTAL_ALLOCATION);
     }
 
@@ -44,15 +45,12 @@ contract KickoffFactoryTest is Test {
     }
 
     function test_CreatePool() public {
-        vm.startPrank(admin);
-
-        // Approve tokens
+        // Approve tokens from pool admin
+        vm.prank(admin);
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
 
-        // Create pool (minVotingPower = 0)
-        address pool = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 0);
-
-        vm.stopPrank();
+        // Create pool (called by factory owner, admin is pool admin)
+        address pool = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, admin);
 
         // Verify pool was created
         assertTrue(pool != address(0));
@@ -68,6 +66,7 @@ contract KickoffFactoryTest is Test {
         assertEq(voteSalePool.totalAllocation(), TOTAL_ALLOCATION);
         assertEq(voteSalePool.saleAllocation(), TOTAL_ALLOCATION / 2);
         assertEq(voteSalePool.liquidityAllocation(), TOTAL_ALLOCATION - TOTAL_ALLOCATION / 2);
+        assertEq(voteSalePool.minVotingPower(), MIN_VOTING_POWER);
 
         // Verify tokens were transferred
         assertEq(projectToken.balanceOf(pool), TOTAL_ALLOCATION);
@@ -75,36 +74,55 @@ contract KickoffFactoryTest is Test {
     }
 
     function test_CreatePool_RevertZeroAddress() public {
-        vm.startPrank(admin);
+        vm.prank(admin);
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
 
         vm.expectRevert(KickoffFactory.ZeroAddress.selector);
-        factory.createPool(address(0), projectOwner, TOTAL_ALLOCATION, 0);
+        factory.createPool(address(0), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, admin);
 
         vm.expectRevert(KickoffFactory.ZeroAddress.selector);
-        factory.createPool(address(projectToken), address(0), TOTAL_ALLOCATION, 0);
+        factory.createPool(address(projectToken), address(0), TOTAL_ALLOCATION, MIN_VOTING_POWER, admin);
 
-        vm.stopPrank();
+        vm.expectRevert(KickoffFactory.ZeroAddress.selector);
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, address(0));
     }
 
     function test_CreatePool_RevertZeroAmount() public {
-        vm.startPrank(admin);
+        vm.prank(admin);
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
 
         vm.expectRevert(KickoffFactory.ZeroAmount.selector);
-        factory.createPool(address(projectToken), projectOwner, 0, 0);
+        factory.createPool(address(projectToken), projectOwner, 0, MIN_VOTING_POWER, admin);
+    }
+    
+    function test_CreatePool_RevertZeroVotingPower() public {
+        vm.prank(admin);
+        projectToken.approve(address(factory), TOTAL_ALLOCATION);
 
-        vm.stopPrank();
+        // #1: minVotingPower = 0 should revert
+        vm.expectRevert(KickoffFactory.ZeroVotingPower.selector);
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 0, admin);
     }
 
     function test_CreatePool_RevertDuplicate() public {
-        vm.startPrank(admin);
+        vm.prank(admin);
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
-        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2, 0);
+        
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2, MIN_VOTING_POWER, admin);
 
         vm.expectRevert(KickoffFactory.PoolAlreadyExists.selector);
-        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2, 0);
-
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION / 2, MIN_VOTING_POWER, admin);
+    }
+    
+    function test_CreatePool_RevertNotOwner() public {
+        // #5: Only factory owner can create pools
+        vm.startPrank(user);
+        projectToken.mint(user, TOTAL_ALLOCATION);
+        projectToken.approve(address(factory), TOTAL_ALLOCATION);
+        
+        vm.expectRevert(KickoffFactory.NotOwner.selector);
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, user);
+        
         vm.stopPrank();
     }
 
@@ -117,14 +135,13 @@ contract KickoffFactoryTest is Test {
         token2.mint(admin, TOTAL_ALLOCATION);
 
         vm.startPrank(admin);
-
         token1.approve(address(factory), TOTAL_ALLOCATION);
-        address pool1 = factory.createPool(address(token1), projectOwner, TOTAL_ALLOCATION, 0);
-
         token2.approve(address(factory), TOTAL_ALLOCATION);
-        address pool2 = factory.createPool(address(token2), projectOwner, TOTAL_ALLOCATION, 0);
-
         vm.stopPrank();
+
+        // Factory owner creates pools
+        address pool1 = factory.createPool(address(token1), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, admin);
+        address pool2 = factory.createPool(address(token2), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, admin);
 
         address[] memory pools = factory.getAllPools();
         assertEq(pools.length, 2);
@@ -162,4 +179,3 @@ contract KickoffFactoryTest is Test {
         factory.acceptOwnership();
     }
 }
-

@@ -51,6 +51,15 @@ contract MockVoter {
         // Mock implementation
     }
 
+    // Aerodrome V2 API functions
+    function gaugeToFees(address gauge) external view returns (address) {
+        return internal_bribes[gauge];
+    }
+    
+    function gaugeToBribe(address gauge) external view returns (address) {
+        return external_bribes[gauge];
+    }
+
     // Setup functions for testing
     function setGauge(address pool, address gauge) external {
         gauges[pool] = gauge;

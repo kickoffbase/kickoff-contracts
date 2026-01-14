@@ -80,5 +80,10 @@ interface IVotingEscrow {
     /// @param tokenId The NFT token ID
     /// @return The token URI
     function tokenURI(uint256 tokenId) external view returns (string memory);
+    
+    /// @notice Check if an NFT is deactivated (managed NFT that was deactivated)
+    /// @param tokenId The NFT token ID
+    /// @return True if the NFT is deactivated
+    function deactivated(uint256 tokenId) external view returns (bool);
 }
 

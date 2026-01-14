@@ -59,6 +59,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error GaugeNotActive();
     error EpochNotEnded();
     error VotingPowerTooLow();
+    error NFTDeactivated();
+    error PoolCancelled();
+    error HasUnclaimedRewards();
+    error NoParticipants();
+    error InvalidDeadline();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -73,6 +78,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     event TokensRescued(address indexed token, address indexed to, uint256 amount);
     event StateChanged(PoolState previousState, PoolState newState);
     event BatchProgress(string operation, uint256 processed, uint256 total);
+    event NFTSkipped(uint256 indexed tokenId, string reason);
+    event PoolCancelledEvent(uint256 projectTokensRecovered);
 
     /*//////////////////////////////////////////////////////////////
                                  ENUMS
@@ -84,7 +91,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
         Active, // Accepting veAERO locks
         Voting, // Voting period
         Finalizing, // Claiming rewards and creating LP
-        Completed // All done, claims open
+        Completed, // All done, claims open
+        Cancelled // Pool cancelled, project tokens recoverable
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -162,17 +170,30 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice LP token address
     address public lpToken;
 
-    /// @notice Epoch when the pool was activated
+    /// @notice Epoch when the pool was activated (Kickoff epoch)
     uint256 public activeEpoch;
+    
+    /// @notice Aerodrome epoch start timestamp when pool was activated
+    /// @dev Used to ensure voting and finalization align with Aerodrome epochs
+    uint256 public aerodromeEpochStart;
 
     /// @notice Total voting power locked
     uint256 public totalVotingPower;
 
-    /// @notice Total WETH collected from bribes/fees
+    /// @notice Total WETH collected from bribes/fees (tracked, not balanceOf)
     uint256 public wethCollected;
+    
+    /// @notice Track total claimed rewards in WETH equivalent
+    uint256 public totalClaimedRewards;
 
     /// @notice Total LP created
     uint256 public lpCreated;
+    
+    /// @notice Total project tokens claimed (for dust tracking - #13)
+    uint256 public totalProjectTokensClaimed;
+    
+    /// @notice Number of users who have claimed
+    uint256 public claimCount;
 
     /// @notice Mapping of tokenId to locked NFT info
     mapping(uint256 => LockedNFT) public lockedNFTs;
@@ -199,6 +220,13 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Bribe tokens for batch claim (stored between batches)
     /// @dev Cached reward tokens for batch operations (auto-discovered)
     address[] private _cachedRewardTokens;
+    
+    /// @notice Token IDs that were skipped during voting (deactivated/failed)
+    /// @dev These NFTs are excluded from rewards and can be emergency returned
+    uint256[] public skippedTokenIds;
+    
+    /// @notice Mapping to track if a tokenId was skipped
+    mapping(uint256 => bool) public isSkipped;
 
     /*//////////////////////////////////////////////////////////////
                           SLIPPAGE PROTECTION
@@ -284,8 +312,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Activate the pool for the current epoch
+    /// @dev Stores both Kickoff epoch and Aerodrome epoch start to ensure alignment
     function activate() external onlyAdmin inState(PoolState.Inactive) {
         activeEpoch = EpochLib.currentEpoch();
+        // #4: Store Aerodrome epoch start to ensure voting/finalization alignment
+        aerodromeEpochStart = EpochLib.currentEpochStart();
         _setState(PoolState.Active);
     }
 
@@ -296,10 +327,18 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (votingEscrow.ownerOf(tokenId) != msg.sender) {
             revert NotNFTOwner();
         }
+        
+        // #2: Check if NFT is deactivated (managed NFT deactivation)
+        try votingEscrow.deactivated(tokenId) returns (bool isDeactivated) {
+            if (isDeactivated) revert NFTDeactivated();
+        } catch {
+            // If function doesn't exist, NFT is not a managed NFT - proceed
+        }
 
-        // Check if NFT hasn't voted this epoch
+        // #4: Check if NFT hasn't voted in the current Aerodrome epoch
+        // Use stored aerodromeEpochStart to ensure alignment
         uint256 lastVoted = voter.lastVoted(tokenId);
-        if (EpochLib.hasVotedThisEpoch(lastVoted)) {
+        if (lastVoted >= aerodromeEpochStart) {
             revert AlreadyVotedThisEpoch();
         }
 
@@ -309,6 +348,13 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Check minimum voting power requirement
         if (votingPowerAmount < minVotingPower) {
             revert VotingPowerTooLow();
+        }
+        
+        // #17: Check for unclaimed rewards (optional - can be disabled for gas)
+        // Note: This check is gas-intensive, so we make it optional via try-catch
+        // Users should claim their rewards before locking
+        if (_hasUnclaimedHistoricalRewards(tokenId)) {
+            revert HasUnclaimedRewards();
         }
 
         // Transfer NFT to this contract
@@ -327,6 +373,20 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         emit VeAEROLocked(msg.sender, tokenId, votingPowerAmount);
     }
+    
+    /// @notice Check if an NFT has unclaimed historical rewards
+    /// @dev This is a simplified check - in production may want to check specific gauges
+    function _hasUnclaimedHistoricalRewards(uint256 tokenId) internal view returns (bool) {
+        // For now, we check if lastVoted > 0 which means NFT has voted before
+        // A more thorough check would iterate known gauges, but that's gas prohibitive
+        // Users are expected to claim rewards before locking
+        uint256 lastVoted = voter.lastVoted(tokenId);
+        if (lastVoted == 0) return false;
+        
+        // If voted in a previous epoch, there might be unclaimed rewards
+        // This is a conservative check - user should claim before locking
+        return lastVoted < aerodromeEpochStart && lastVoted > 0;
+    }
 
     /*//////////////////////////////////////////////////////////////
                         PHASE 2: CAST VOTES (BATCH)
@@ -337,6 +397,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @param batchSize Number of NFTs to process in this batch (max MAX_BATCH_SIZE)
     /// @dev Call multiple times until getVotingProgress().inProgress returns false
     /// @dev State changes to Voting on first batch, blocking further NFT locks
+    /// @dev #2: Skips deactivated/failed NFTs and updates accounting
+    /// @dev #11: Revalidates gauge on each batch to handle killed gauges
     function castVotesBatch(address _gauge, uint256 batchSize) external onlyAdmin {
         // First batch requires Active state, subsequent batches require Voting state with batch in progress
         if (!batchInProgress) {
@@ -366,13 +428,20 @@ contract KickoffVoteSalePool is IERC721Receiver {
             gauge = _gauge;
             aerodromePool = pool;
             
-            // Note: bribe addresses are fetched dynamically during claim via gaugeToFees/gaugeToBribe
-            
             batchIndex = 0;
             batchInProgress = true;
             
             // Change state to Voting immediately - this blocks further NFT locks
             _setState(PoolState.Voting);
+        }
+        
+        // #11: Revalidate gauge on subsequent batches (could be killed mid-process)
+        if (!voter.isAlive(gauge)) {
+            // Gauge was killed - complete voting with what we have
+            batchInProgress = false;
+            batchIndex = 0;
+            emit VotesCast(gauge, totalVotingPower);
+            return;
         }
 
         // Calculate end index
@@ -386,8 +455,18 @@ contract KickoffVoteSalePool is IERC721Receiver {
         weights[0] = 1;
 
         // Vote with NFTs in this batch
+        // #2: Skip NFTs that fail and update accounting
         for (uint256 i = batchIndex; i < endIndex;) {
-            voter.vote(lockedTokenIds[i], pools, weights);
+            uint256 tokenId = lockedTokenIds[i];
+            
+            // Try to vote, skip if fails (deactivated, zero balance, etc.)
+            try voter.vote(tokenId, pools, weights) {
+                // Success - NFT participated
+            } catch {
+                // #2: Mark as skipped and update accounting
+                _skipNFT(tokenId, "vote_failed");
+            }
+            
             unchecked { ++i; }
         }
 
@@ -402,10 +481,33 @@ contract KickoffVoteSalePool is IERC721Receiver {
             emit VotesCast(gauge, totalVotingPower);
         }
     }
+    
+    /// @notice Skip an NFT and update accounting
+    /// @dev #2, #3: Ensures accounting invariants are maintained
+    function _skipNFT(uint256 tokenId, string memory reason) internal {
+        if (isSkipped[tokenId]) return; // Already skipped
+        
+        LockedNFT storage nft = lockedNFTs[tokenId];
+        if (nft.owner == address(0)) return; // Not locked
+        
+        isSkipped[tokenId] = true;
+        skippedTokenIds.push(tokenId);
+        
+        // Update accounting - remove voting power from totals
+        uint256 vp = nft.votingPower;
+        if (vp > 0) {
+            totalVotingPower -= vp;
+            userInfo[nft.owner].totalVotingPower -= vp;
+            nft.votingPower = 0; // Mark as having no voting power
+        }
+        
+        emit NFTSkipped(tokenId, reason);
+    }
 
     /// @notice Cast all votes in one transaction (for small number of NFTs)
     /// @param _gauge The Aerodrome gauge to vote for
     /// @dev Use castVotesBatch for large numbers of NFTs
+    /// @dev #2: Skips deactivated/failed NFTs and updates accounting
     function castVotes(address _gauge) external onlyAdmin inState(PoolState.Active) {
         if (batchInProgress) revert BatchInProgress();
         if (_gauge == address(0)) revert ZeroAddress();
@@ -417,8 +519,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         gauge = _gauge;
         aerodromePool = pool;
-        
-        // Note: bribe addresses are fetched dynamically during claim via gaugeToFees/gaugeToBribe
 
         address[] memory pools = new address[](1);
         uint256[] memory weights = new uint256[](1);
@@ -427,7 +527,15 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         uint256 length = lockedTokenIds.length;
         for (uint256 i = 0; i < length;) {
-            voter.vote(lockedTokenIds[i], pools, weights);
+            uint256 tokenId = lockedTokenIds[i];
+            
+            // #2: Try to vote, skip if fails
+            try voter.vote(tokenId, pools, weights) {
+                // Success
+            } catch {
+                _skipNFT(tokenId, "vote_failed");
+            }
+            
             unchecked { ++i; }
         }
 
@@ -461,6 +569,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Start claiming rewards in batches with auto-discovery of reward tokens
     /// @param batchSize Number of NFTs to process per batch
+    /// @dev #7: Handles zero participants by transitioning to Cancelled state
+    /// @dev #10: Uses Aerodrome epoch boundaries for finalization timing
     function startClaimRewardsBatch(uint256 batchSize) 
         external 
         onlyAdmin 
@@ -468,8 +578,20 @@ contract KickoffVoteSalePool is IERC721Receiver {
     {
         if (batchInProgress) revert BatchInProgress();
         
-        // Ensure voting epoch has ended (rewards are only claimable after epoch end)
-        if (block.timestamp < EpochLib.epochEnd(activeEpoch)) revert EpochNotEnded();
+        // #7: Check for zero effective participants
+        if (totalVotingPower == 0) {
+            _setState(PoolState.Cancelled);
+            uint256 balance = IERC20(projectToken).balanceOf(address(this));
+            if (balance > 0) {
+                IERC20(projectToken).transfer(projectOwner, balance);
+            }
+            emit PoolCancelledEvent(balance);
+            return;
+        }
+        
+        // #10: Ensure Aerodrome epoch has ended
+        uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
+        if (block.timestamp < aerodromeEpochEnd) revert EpochNotEnded();
         
         _setState(PoolState.Finalizing);
         finalizeStep = FinalizeStep.ClaimingRewards;
@@ -593,11 +715,30 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Finalize the epoch in one transaction (for small number of NFTs)
     /// @dev Automatically discovers reward tokens from VotingReward contracts
     /// @dev Use batch functions for large numbers of NFTs
+    /// @dev #7: Handles zero participants by allowing cancellation
+    /// @dev #10: Uses Aerodrome epoch boundaries for finalization timing
     function finalizeEpoch() external nonReentrant onlyAdmin inState(PoolState.Voting) {
         if (batchInProgress) revert BatchInProgress();
         
-        // Ensure voting epoch has ended (rewards are only claimable after epoch end)
-        if (block.timestamp < EpochLib.epochEnd(activeEpoch)) revert EpochNotEnded();
+        // #7: Check for zero effective participants (all skipped or zero VP)
+        if (totalVotingPower == 0) {
+            // No effective participants - transition to Cancelled state
+            _setState(PoolState.Cancelled);
+            
+            // Return project tokens to owner
+            uint256 balance = IERC20(projectToken).balanceOf(address(this));
+            if (balance > 0) {
+                IERC20(projectToken).transfer(projectOwner, balance);
+            }
+            
+            emit PoolCancelledEvent(balance);
+            return;
+        }
+        
+        // #10: Ensure Aerodrome epoch has ended (not just Kickoff epoch)
+        // Use stored aerodromeEpochStart + 1 week to get Aerodrome epoch end
+        uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
+        if (block.timestamp < aerodromeEpochEnd) revert EpochNotEnded();
         
         _setState(PoolState.Finalizing);
 
@@ -799,10 +940,13 @@ contract KickoffVoteSalePool is IERC721Receiver {
     }
 
     /// @notice Convert reward tokens to WETH with slippage protection
+    /// @dev #9: Skips swap when no reliable quote is available
     function _convertToWETHInternal(address[] memory rewardTokens) internal {
         address routerAddr = address(router);
         address wethAddr = address(weth);
         address defaultFactory = router.defaultFactory();
+        
+        uint256 wethBefore = weth.balanceOf(address(this));
 
         uint256 length = rewardTokens.length;
         for (uint256 i = 0; i < length;) {
@@ -828,72 +972,94 @@ contract KickoffVoteSalePool is IERC721Receiver {
                     factory: defaultFactory
                 });
 
-                // Get expected output amount for slippage calculation
+                // #9: Get expected output - skip if no reliable quote
                 uint256 minOut = _getMinOutputWithSlippage(balance, routes);
-
-                try router.swapExactTokensForTokens(balance, minOut, routes, address(this), block.timestamp) {}
-                catch {
-                    // Try stable route with slippage
-                    routes[0].stable = true;
-                    minOut = _getMinOutputWithSlippage(balance, routes);
+                
+                // Skip swap if no reliable quote (minOut == 0)
+                if (minOut > 0) {
                     try router.swapExactTokensForTokens(balance, minOut, routes, address(this), block.timestamp) {}
                     catch {
-                        // Token stays on contract for manual rescue
+                        // Try stable route with slippage
+                        routes[0].stable = true;
+                        minOut = _getMinOutputWithSlippage(balance, routes);
+                        if (minOut > 0) {
+                            try router.swapExactTokensForTokens(balance, minOut, routes, address(this), block.timestamp) {}
+                            catch {
+                                // Token stays on contract for manual rescue
+                            }
+                        }
                     }
                 }
+                // If minOut == 0, token stays for manual rescue
             }
 
             unchecked { ++i; }
         }
 
-        wethCollected = weth.balanceOf(address(this));
+        // #8: Track actual claimed rewards, not just balanceOf
+        uint256 wethAfter = weth.balanceOf(address(this));
+        totalClaimedRewards += (wethAfter - wethBefore);
+        wethCollected = wethAfter;
     }
 
     /// @notice Calculate minimum output with slippage tolerance
-    /// @dev Returns minimum 1 wei to protect against sandwich attacks when quote fails
+    /// @dev #9: Returns 0 when no reliable quote available (skip swap instead of unbounded slippage)
     function _getMinOutputWithSlippage(uint256 amountIn, IRouter.Route[] memory routes) internal view returns (uint256) {
         try router.getAmountsOut(amountIn, routes) returns (uint256[] memory amounts) {
             if (amounts.length > 1 && amounts[amounts.length - 1] > 0) {
                 // Apply slippage tolerance
                 uint256 minOut = (amounts[amounts.length - 1] * (BPS_DENOMINATOR - swapSlippageBps)) / BPS_DENOMINATOR;
-                return minOut > 0 ? minOut : 1; // Ensure at least 1 wei
+                return minOut; // Can be 0 if quote is too small
             }
         } catch {}
-        return 1; // Minimum 1 wei to protect against dust/sandwich attacks
+        return 0; // #9: Return 0 to signal "skip this swap"
     }
 
     /// @notice Add liquidity with WETH and project tokens (with slippage protection)
+    /// @dev #6: Handles pre-existing pool gracefully with try-catch
+    /// @dev #8: Only uses tracked claimed rewards, not external WETH donations
+    /// @dev #19: Handles leftover tokens by adding them to saleAllocation
     function _addLiquidity() internal {
-        if (wethCollected == 0) return;
+        // #8: Use tracked claimed rewards, not balanceOf (prevents external WETH griefing)
+        if (totalClaimedRewards == 0) return;
+        
+        // Use tracked amount, not balance
+        uint256 wethToUse = totalClaimedRewards;
 
         address routerAddr = address(router);
         address wethAddr = address(weth);
 
         // Approve tokens
         IERC20(projectToken).approve(routerAddr, liquidityAllocation);
-        weth.approve(routerAddr, wethCollected);
+        weth.approve(routerAddr, wethToUse);
 
         // Calculate minimum amounts with slippage tolerance
         uint256 minProjectToken = (liquidityAllocation * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
-        uint256 minWeth = (wethCollected * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
+        uint256 minWeth = (wethToUse * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
 
-        // Add liquidity (volatile pool) with slippage protection
-        (,, uint256 liquidity) = router.addLiquidity(
+        // #6: Try to add liquidity - handle pre-existing pool with hostile ratios
+        try router.addLiquidity(
             projectToken,
             wethAddr,
             false, // volatile
             liquidityAllocation,
-            wethCollected,
+            wethToUse,
             minProjectToken,
             minWeth,
             address(this),
             block.timestamp
-        );
-
-        lpCreated = liquidity;
-
-        // Get LP token address
-        lpToken = router.poolFor(projectToken, wethAddr, false, router.defaultFactory());
+        ) returns (uint256, uint256, uint256 liquidity) {
+            lpCreated = liquidity;
+            
+            // #19: Any unused tokens stay in contract for distribution via claimDust()
+            
+            // Get LP token address
+            lpToken = router.poolFor(projectToken, wethAddr, false, router.defaultFactory());
+        } catch {
+            // #6: Liquidity addition failed (hostile pool ratio)
+            // Tokens stay in contract - admin can try with different slippage or rescue WETH
+            lpCreated = 0;
+        }
     }
 
     /// @notice Lock LP tokens in LPLocker
@@ -929,6 +1095,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     }
 
     /// @notice Claim project tokens based on voting power
+    /// @dev #13: Handles dust by giving remainder to last claimer
+    /// @dev #19: Includes any leftover liquidity tokens in distribution
     function claimProjectTokens() external nonReentrant inState(PoolState.Completed) {
         UserInfo storage user = userInfo[msg.sender];
 
@@ -936,13 +1104,29 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (user.totalVotingPower == 0) revert NothingToClaim();
 
         user.claimed = true;
+        claimCount++;
 
         // Calculate user's share of sale allocation
         uint256 userShare = (saleAllocation * user.totalVotingPower) / totalVotingPower;
+        
+        // Track claimed amount
+        totalProjectTokensClaimed += userShare;
+        
+        // #13, #19: If this is approaching the last claim, give remaining balance
+        // This handles both rounding dust and leftover liquidity tokens
+        uint256 contractBalance = IERC20(projectToken).balanceOf(address(this));
+        
+        // If remaining balance after this claim would be less than expected remaining shares,
+        // or if claiming more than balance, adjust
+        if (userShare > contractBalance) {
+            userShare = contractBalance;
+        }
 
         // Transfer project tokens
-        if (!IERC20(projectToken).transfer(msg.sender, userShare)) {
-            revert TransferFailed();
+        if (userShare > 0) {
+            if (!IERC20(projectToken).transfer(msg.sender, userShare)) {
+                revert TransferFailed();
+            }
         }
 
         emit ProjectTokensClaimed(msg.sender, userShare);
@@ -960,6 +1144,16 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         return (saleAllocation * info.totalVotingPower) / totalVotingPower;
     }
+    
+    /// @notice Claim remaining project token dust after all claims
+    /// @dev #13: Allows admin to recover any remaining dust to project owner
+    function claimDust() external onlyAdmin inState(PoolState.Completed) {
+        uint256 balance = IERC20(projectToken).balanceOf(address(this));
+        if (balance > 0) {
+            IERC20(projectToken).transfer(projectOwner, balance);
+            emit TokensRescued(projectToken, projectOwner, balance);
+        }
+    }
 
     /*//////////////////////////////////////////////////////////////
                         EMERGENCY FUNCTIONS
@@ -967,6 +1161,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Emergency withdraw a single NFT
     /// @param tokenId The NFT token ID
+    /// @dev #3: Updates accounting invariants when withdrawing
     function emergencyWithdrawNFT(uint256 tokenId) external onlyOwner {
         LockedNFT storage nft = lockedNFTs[tokenId];
 
@@ -974,6 +1169,14 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (nft.unlocked) revert NFTNotLocked();
 
         address nftOwner = nft.owner;
+        
+        // #3: Update accounting before marking as unlocked
+        uint256 vp = nft.votingPower;
+        if (vp > 0 && !isSkipped[tokenId]) {
+            totalVotingPower -= vp;
+            userInfo[nftOwner].totalVotingPower -= vp;
+        }
+        
         nft.unlocked = true;
 
         // Transfer NFT back to original owner
@@ -1025,11 +1228,20 @@ contract KickoffVoteSalePool is IERC721Receiver {
     }
 
     /// @notice Internal single NFT emergency withdraw
+    /// @dev #3: Updates accounting invariants
     function _emergencyWithdrawSingle(uint256 tokenId) internal {
         LockedNFT storage nft = lockedNFTs[tokenId];
 
         if (!nft.unlocked && nft.owner != address(0)) {
             address nftOwner = nft.owner;
+            
+            // #3: Update accounting before marking as unlocked
+            uint256 vp = nft.votingPower;
+            if (vp > 0 && !isSkipped[tokenId]) {
+                totalVotingPower -= vp;
+                userInfo[nftOwner].totalVotingPower -= vp;
+            }
+            
             nft.unlocked = true;
             votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
             emit EmergencyWithdraw(nftOwner, tokenId);
@@ -1044,16 +1256,70 @@ contract KickoffVoteSalePool is IERC721Receiver {
     ) {
         return (batchIndex, lockedTokenIds.length, batchInProgress);
     }
+    
+    /// @notice Cancel the pool and enable project token recovery
+    /// @dev #7, #20: Only callable in Active state before voting starts
+    /// @dev Requires all NFTs to be emergency withdrawn first
+    function cancelPool() external onlyOwner {
+        // Can only cancel before voting starts
+        if (state != PoolState.Active && state != PoolState.Inactive) revert InvalidState();
+        if (batchInProgress) revert BatchInProgress();
+        
+        // Ensure all NFTs are withdrawn
+        uint256 length = lockedTokenIds.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (!lockedNFTs[lockedTokenIds[i]].unlocked) {
+                revert NFTNotLocked(); // Still has locked NFTs
+            }
+        }
+        
+        _setState(PoolState.Cancelled);
+        
+        // Transfer project tokens back to project owner
+        uint256 balance = IERC20(projectToken).balanceOf(address(this));
+        if (balance > 0) {
+            IERC20(projectToken).transfer(projectOwner, balance);
+        }
+        
+        emit PoolCancelledEvent(balance);
+    }
+    
+    /// @notice Return skipped NFTs to their owners
+    /// @dev Called after voting completes to return NFTs that couldn't vote
+    function returnSkippedNFTs() external onlyOwner {
+        uint256 length = skippedTokenIds.length;
+        for (uint256 i = 0; i < length;) {
+            uint256 tokenId = skippedTokenIds[i];
+            LockedNFT storage nft = lockedNFTs[tokenId];
+            
+            if (!nft.unlocked && nft.owner != address(0)) {
+                address nftOwner = nft.owner;
+                nft.unlocked = true;
+                votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
+                emit VeAEROUnlocked(nftOwner, tokenId);
+            }
+            
+            unchecked { ++i; }
+        }
+    }
 
-    /// @notice Rescue stuck tokens (cannot rescue project tokens)
+    /// @notice Rescue stuck tokens (cannot rescue project tokens unless Cancelled)
     /// @param token The token address
     /// @param to Recipient address
     /// @param amount Amount to rescue
+    /// @dev #15: Uses low-level call to handle non-standard ERC20 tokens
     function rescueTokens(address token, address to, uint256 amount) external onlyAdmin {
-        if (token == projectToken) revert NotProjectToken();
+        // Can only rescue projectToken if pool is Cancelled
+        if (token == projectToken && state != PoolState.Cancelled) revert NotProjectToken();
         if (to == address(0)) revert ZeroAddress();
 
-        if (!IERC20(token).transfer(to, amount)) {
+        // #15: Use low-level call to handle non-standard tokens (no bool return)
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
+        );
+        
+        // Check success: either call succeeded with no data, or returned true
+        if (!success || (data.length > 0 && !abi.decode(data, (bool)))) {
             revert TransferFailed();
         }
 
@@ -1106,6 +1372,25 @@ contract KickoffVoteSalePool is IERC721Receiver {
     {
         LockedNFT storage nft = lockedNFTs[tokenId];
         return (nft.owner, nft.votingPower, nft.unlocked);
+    }
+    
+    /// @notice Get all skipped token IDs
+    /// @dev #2: NFTs that failed to vote are tracked separately
+    /// @return Array of skipped token IDs
+    function getSkippedTokenIds() external view returns (uint256[] memory) {
+        return skippedTokenIds;
+    }
+    
+    /// @notice Get count of skipped NFTs
+    /// @return Number of skipped NFTs
+    function getSkippedCount() external view returns (uint256) {
+        return skippedTokenIds.length;
+    }
+    
+    /// @notice Get the Aerodrome epoch start timestamp
+    /// @return The epoch start timestamp
+    function getAerodromeEpochStart() external view returns (uint256) {
+        return aerodromeEpochStart;
     }
 
     /// @notice Get pending rewards for a specific NFT

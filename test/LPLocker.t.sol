@@ -113,13 +113,32 @@ contract LPLockerTest is Test {
         token0.mint(address(aerodromePool), FEES_AMOUNT);
         token1.mint(address(aerodromePool), FEES_AMOUNT);
 
-        // Claim as admin
-        vm.prank(admin);
+        // #18: Claim first (accrues fees)
         lpLocker.claimTradingFees(votePool);
 
-        // Verify split: 30% admin, 70% project owner
+        // Verify fees are accrued
         uint256 expectedAdminShare = (FEES_AMOUNT * 3000) / 10000; // 30%
         uint256 expectedProjectShare = FEES_AMOUNT - expectedAdminShare; // 70%
+        
+        (uint256 adminBal0, uint256 projectBal0) = lpLocker.getAccruedFees(votePool, address(token0));
+        (uint256 adminBal1, uint256 projectBal1) = lpLocker.getAccruedFees(votePool, address(token1));
+        
+        assertEq(adminBal0, expectedAdminShare);
+        assertEq(adminBal1, expectedAdminShare);
+        assertEq(projectBal0, expectedProjectShare);
+        assertEq(projectBal1, expectedProjectShare);
+        
+        // #18: Admin withdraws their fees
+        vm.startPrank(admin);
+        lpLocker.withdrawAdminFees(votePool, address(token0), admin);
+        lpLocker.withdrawAdminFees(votePool, address(token1), admin);
+        vm.stopPrank();
+        
+        // #18: Project owner withdraws their fees
+        vm.startPrank(projectOwner);
+        lpLocker.withdrawProjectFees(votePool, address(token0), projectOwner);
+        lpLocker.withdrawProjectFees(votePool, address(token1), projectOwner);
+        vm.stopPrank();
 
         assertEq(token0.balanceOf(admin), expectedAdminShare);
         assertEq(token1.balanceOf(admin), expectedAdminShare);
@@ -134,24 +153,35 @@ contract LPLockerTest is Test {
         token0.mint(address(aerodromePool), FEES_AMOUNT);
         token1.mint(address(aerodromePool), FEES_AMOUNT);
 
-        // Claim as project owner
-        vm.prank(projectOwner);
+        // #18: Anyone can claim (accrue), but only authorized can withdraw
         lpLocker.claimTradingFees(votePool);
 
-        // Verify split
+        // Verify fees are accrued
         uint256 expectedAdminShare = (FEES_AMOUNT * 3000) / 10000;
         uint256 expectedProjectShare = FEES_AMOUNT - expectedAdminShare;
+        
+        // Project owner withdraws
+        vm.startPrank(projectOwner);
+        lpLocker.withdrawProjectFees(votePool, address(token0), projectOwner);
+        vm.stopPrank();
 
-        assertEq(token0.balanceOf(admin), expectedAdminShare);
         assertEq(token0.balanceOf(projectOwner), expectedProjectShare);
     }
 
     function test_ClaimTradingFees_RevertNotAuthorized() public {
         _lockLP();
 
+        aerodromePool.setClaimableFees(FEES_AMOUNT, FEES_AMOUNT);
+        token0.mint(address(aerodromePool), FEES_AMOUNT);
+        token1.mint(address(aerodromePool), FEES_AMOUNT);
+        
+        // Claim and accrue fees
+        lpLocker.claimTradingFees(votePool);
+
+        // Random user cannot withdraw
         vm.prank(randomUser);
         vm.expectRevert(LPLocker.NotAuthorized.selector);
-        lpLocker.claimTradingFees(votePool);
+        lpLocker.withdrawAdminFees(votePool, address(token0), randomUser);
     }
 
     function test_ClaimTradingFees_RevertPoolNotFound() public {

@@ -78,14 +78,17 @@ contract ComprehensiveForkTest is Test {
         projectToken = new MockToken("KICKOFF", "KICK");
         projectToken.mint(admin, 10_000_000 ether);
 
-        vm.prank(admin);
+        // Deploy factory (this contract becomes owner)
         factory = new KickoffFactory(VOTING_ESCROW, VOTER, ROUTER, WETH);
         lpLocker = factory.lpLocker();
 
-        vm.startPrank(admin);
+        // Admin approves tokens
+        vm.prank(admin);
         projectToken.approve(address(factory), 10_000_000 ether);
-        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether, 0));
-        vm.stopPrank();
+        
+        // Factory owner (this contract) creates pool, admin becomes pool admin
+        // #1: minVotingPower must be > 0
+        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether, 1 ether, admin));
     }
 
     /// @notice Full flow with 52 holders
