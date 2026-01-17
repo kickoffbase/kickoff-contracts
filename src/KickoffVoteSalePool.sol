@@ -65,7 +65,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error NoParticipants();
     error InvalidDeadline();
     error NotAllClaimed();
-    error EpochChanged();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -411,6 +410,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @dev State changes to Voting on first batch, blocking further NFT locks
     /// @dev #2: Skips deactivated/failed NFTs and updates accounting
     /// @dev #11: Revalidates gauge on each batch to handle killed gauges
+    /// @dev #12: If epoch changes or gauge is killed mid-batch, voting completes gracefully
+    ///      with current progress. All locked NFT holders remain eligible for project token
+    ///      claims regardless of whether their NFT successfully voted, as they committed
+    ///      their veAERO in good faith for the epoch duration.
     function castVotesBatch(address _gauge, uint256 batchSize) external onlyAdmin {
         // First batch requires Active state, subsequent batches require Voting state with batch in progress
         if (!batchInProgress) {
@@ -456,9 +459,15 @@ contract KickoffVoteSalePool is IERC721Receiver {
             return;
         }
         
-        // #12: Ensure we're still in the same Aerodrome epoch
+        // #12: Check if epoch changed - complete gracefully instead of reverting
         uint256 currentEpochStart = EpochLib.currentEpochStart();
-        if (currentEpochStart != aerodromeEpochStart) revert EpochChanged();
+        if (currentEpochStart != aerodromeEpochStart) {
+            // Epoch changed mid-batch - complete voting with current progress
+            batchInProgress = false;
+            batchIndex = 0;
+            emit VotesCast(gauge, totalVotingPower);
+            return;
+        }
 
         // Calculate end index
         uint256 endIndex = batchIndex + batchSize;
@@ -500,6 +509,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
     
     /// @notice Skip an NFT and update accounting
     /// @dev #2, #3: Ensures accounting invariants are maintained
+    /// @dev FIND-002/007: Updates participantCount when user has no remaining voting power
     function _skipNFT(uint256 tokenId, string memory reason) internal {
         if (isSkipped[tokenId]) return; // Already skipped
         
@@ -514,6 +524,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (vp > 0) {
             totalVotingPower -= vp;
             userInfo[nft.owner].totalVotingPower -= vp;
+            // FIND-002/007: Decrement participant count if user has no more voting power
+            if (userInfo[nft.owner].totalVotingPower == 0) {
+                participantCount--;
+            }
             nft.votingPower = 0; // Mark as having no voting power
         }
         
@@ -1150,19 +1164,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
         emit ProjectTokensClaimed(msg.sender, userShare);
     }
-
-    /// @notice Get the amount of project tokens claimable by a user
-    /// @param user The user address
-    /// @return The claimable amount
-    function getClaimableTokens(address user) external view returns (uint256) {
-        UserInfo storage info = userInfo[user];
-
-        if (info.claimed || info.totalVotingPower == 0 || totalVotingPower == 0) {
-            return 0;
-        }
-
-        return (saleAllocation * info.totalVotingPower) / totalVotingPower;
-    }
     
     /// @notice Claim remaining project token dust after ALL users have claimed
     /// @dev #13: Only callable after all participants have claimed their tokens
@@ -1252,6 +1253,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Internal single NFT emergency withdraw
     /// @dev #3: Updates accounting invariants
+    /// @dev FIND-002/007: Updates participantCount when user has no remaining voting power
     function _emergencyWithdrawSingle(uint256 tokenId) internal {
         LockedNFT storage nft = lockedNFTs[tokenId];
 
@@ -1263,6 +1265,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
             if (vp > 0 && !isSkipped[tokenId]) {
                 totalVotingPower -= vp;
                 userInfo[nftOwner].totalVotingPower -= vp;
+                // FIND-002/007: Decrement participant count if user has no more voting power
+                if (userInfo[nftOwner].totalVotingPower == 0) {
+                    participantCount--;
+                }
             }
             
             nft.unlocked = true;
@@ -1379,174 +1385,22 @@ contract KickoffVoteSalePool is IERC721Receiver {
                           VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Get the count of locked NFTs
-    /// @return The count
-    function getLockedNFTCount() external view returns (uint256) {
-        return lockedTokenIds.length;
-    }
-
     /// @notice Get all locked token IDs
     /// @return Array of token IDs
     function getLockedTokenIds() external view returns (uint256[] memory) {
         return lockedTokenIds;
     }
-
-    /// @notice Get info about a locked NFT
-    /// @param tokenId The NFT token ID
-    /// @return owner_ The original owner
-    /// @return votingPower_ The voting power
-    /// @return unlocked_ Whether it's been unlocked
-    function getLockedNFTInfo(uint256 tokenId)
-        external
-        view
-        returns (address owner_, uint256 votingPower_, bool unlocked_)
-    {
-        LockedNFT storage nft = lockedNFTs[tokenId];
-        return (nft.owner, nft.votingPower, nft.unlocked);
-    }
     
     /// @notice Get all skipped token IDs
-    /// @dev #2: NFTs that failed to vote are tracked separately
-    /// @return Array of skipped token IDs
+    /// @return Array of skipped token IDs  
     function getSkippedTokenIds() external view returns (uint256[] memory) {
         return skippedTokenIds;
     }
-    
-    /// @notice Get count of skipped NFTs
-    /// @return Number of skipped NFTs
-    function getSkippedCount() external view returns (uint256) {
-        return skippedTokenIds.length;
-    }
-    
-    /// @notice Get the Aerodrome epoch start timestamp
-    /// @return The epoch start timestamp
-    function getAerodromeEpochStart() external view returns (uint256) {
-        return aerodromeEpochStart;
-    }
 
-    /// @notice Get pending rewards for a specific NFT
-    /// @param tokenId The veAERO NFT token ID
-    /// @param rewardTokens Array of reward token addresses to check
-    /// @return feesEarned Array of earned amounts from fees (LP trading fees)
-    /// @return bribesEarned Array of earned amounts from bribes (external)
-    function getPendingRewards(uint256 tokenId, address[] calldata rewardTokens) 
-        external 
-        view 
-        returns (uint256[] memory feesEarned, uint256[] memory bribesEarned) 
-    {
-        feesEarned = new uint256[](rewardTokens.length);
-        bribesEarned = new uint256[](rewardTokens.length);
-        
-        if (gauge == address(0)) return (feesEarned, bribesEarned);
-        
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-        
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            if (feesReward != address(0)) {
-                try IVotingReward(feesReward).earned(rewardTokens[i], tokenId) returns (uint256 amount) {
-                    feesEarned[i] = amount;
-                } catch {}
-            }
-            if (bribeReward != address(0)) {
-                try IVotingReward(bribeReward).earned(rewardTokens[i], tokenId) returns (uint256 amount) {
-                    bribesEarned[i] = amount;
-                } catch {}
-            }
-        }
-    }
-
-    /// @notice Get reward contract addresses for the current gauge
-    /// @return feesReward The fees reward contract (LP trading fees)
-    /// @return bribeReward The bribe reward contract (external bribes)
-    function getRewardContracts() external view returns (address feesReward, address bribeReward) {
-        if (gauge == address(0)) return (address(0), address(0));
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-    }
-
-    /// @notice Get all available reward tokens that have actual rewards to claim
-    /// @return feesTokens Array of token addresses with rewards from fees contract
-    /// @return bribeTokens Array of token addresses with rewards from bribe contract
-    function getAvailableRewardTokens() external view returns (
-        address[] memory feesTokens,
-        address[] memory bribeTokens
-    ) {
-        if (gauge == address(0)) return (new address[](0), new address[](0));
-        
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-        
-        feesTokens = _getTokensWithRewards(feesReward);
-        bribeTokens = _getTokensWithRewards(bribeReward);
-    }
-
-    /// @notice Get total claimable rewards for all locked NFTs
-    /// @param rewardTokens Array of token addresses to check
-    /// @return amounts Array of total claimable amounts for each token
-    function getTotalClaimableRewards(address[] calldata rewardTokens) 
-        external 
-        view 
-        returns (uint256[] memory amounts) 
-    {
-        amounts = new uint256[](rewardTokens.length);
-        
-        if (gauge == address(0) || lockedTokenIds.length == 0) return amounts;
-        
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-        
-        // Sum up rewards across all locked NFTs
-        for (uint256 i = 0; i < lockedTokenIds.length; i++) {
-            uint256 tokenId = lockedTokenIds[i];
-            
-            for (uint256 j = 0; j < rewardTokens.length; j++) {
-                // Check fees rewards
-                if (feesReward != address(0)) {
-                    try IVotingReward(feesReward).earned(rewardTokens[j], tokenId) returns (uint256 earned) {
-                        amounts[j] += earned;
-                    } catch {}
-                }
-                
-                // Check bribe rewards
-                if (bribeReward != address(0)) {
-                    try IVotingReward(bribeReward).earned(rewardTokens[j], tokenId) returns (uint256 earned) {
-                        amounts[j] += earned;
-                    } catch {}
-                }
-            }
-        }
-    }
+    // NOTE: View functions moved to KickoffPoolReader for bytecode optimization:
+    // getPendingRewards, getRewardContracts, getAvailableRewardTokens,
+    // getTotalClaimableRewards, getClaimableTokens, getLockedNFTInfo
+    // Use public mappings directly: lockedNFTs, userInfo, aerodromeEpochStart
 
     /*//////////////////////////////////////////////////////////////
                          OWNER FUNCTIONS

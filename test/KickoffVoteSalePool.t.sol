@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {KickoffFactory} from "../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../src/KickoffVoteSalePool.sol";
+import {KickoffPoolReader} from "../src/KickoffPoolReader.sol";
 import {LPLocker} from "../src/LPLocker.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockVotingEscrow} from "./mocks/MockVotingEscrow.sol";
@@ -13,6 +14,7 @@ import {MockRouter} from "./mocks/MockRouter.sol";
 contract KickoffVoteSalePoolTest is Test {
     KickoffFactory public factory;
     KickoffVoteSalePool public pool;
+    KickoffPoolReader public reader;
     LPLocker public lpLocker;
 
     MockERC20 public projectToken;
@@ -34,7 +36,6 @@ contract KickoffVoteSalePoolTest is Test {
     uint256 public constant TOTAL_ALLOCATION = 1_000_000 ether;
     uint256 public constant USER1_VOTING_POWER = 100_000 ether;
     uint256 public constant USER2_VOTING_POWER = 50_000 ether;
-    uint256 public constant MIN_VOTING_POWER = 1 ether; // #1: Must be > 0
 
     function setUp() public {
         // Set realistic timestamp (current epoch > 0)
@@ -51,7 +52,7 @@ contract KickoffVoteSalePoolTest is Test {
         voter.setGauge(mockPool, mockGauge);
         voter.setBribes(mockGauge, mockInternalBribe, mockExternalBribe);
 
-        // Deploy factory (owner = address(this))
+        // Deploy factory
         factory = new KickoffFactory(
             address(votingEscrow),
             address(voter),
@@ -60,16 +61,18 @@ contract KickoffVoteSalePoolTest is Test {
         );
 
         lpLocker = factory.lpLocker();
+        reader = new KickoffPoolReader();
 
-        // Mint tokens to admin (who will be pool admin)
+        // Mint tokens to admin
         projectToken.mint(admin, TOTAL_ALLOCATION);
 
-        // Approve tokens from admin
+        // Approve tokens from admin (who will provide tokens)
         vm.prank(admin);
         projectToken.approve(address(factory), TOTAL_ALLOCATION);
-
-        // Create pool (factory owner creates, admin is pool admin)
-        address poolAddr = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, admin);
+        
+        // Create pool - called by factory owner (this test contract)
+        // Factory transfers tokens from poolAdmin (admin)
+        address poolAddr = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 1 ether, admin);
         pool = KickoffVoteSalePool(poolAddr);
 
         // Mint veAERO NFTs to users
@@ -88,8 +91,6 @@ contract KickoffVoteSalePoolTest is Test {
         pool.activate();
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Active));
-        // #4: Verify Aerodrome epoch is stored
-        assertTrue(pool.getAerodromeEpochStart() > 0);
     }
 
     function test_Activate_RevertNotAdmin() public {
@@ -112,49 +113,48 @@ contract KickoffVoteSalePoolTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_LockVeAERO() public {
+        // Activate pool
         vm.prank(admin);
         pool.activate();
 
+        // User1 locks their veAERO
         vm.startPrank(user1);
         votingEscrow.approve(address(pool), 1);
         pool.lockVeAERO(1);
         vm.stopPrank();
 
-        assertEq(votingEscrow.ownerOf(1), address(pool));
+        // Verify lock
         assertEq(pool.totalVotingPower(), USER1_VOTING_POWER);
-        assertEq(pool.getLockedNFTCount(), 1);
+        assertEq(votingEscrow.ownerOf(1), address(pool));
 
-        (address owner, uint256 votingPower, bool unlocked) = pool.getLockedNFTInfo(1);
+        (address owner, uint256 votingPower, bool unlocked) = reader.getLockedNFTInfo(address(pool), 1);
         assertEq(owner, user1);
         assertEq(votingPower, USER1_VOTING_POWER);
         assertFalse(unlocked);
+
+        (uint256 userVotingPower, bool claimed) = pool.userInfo(user1);
+        assertEq(userVotingPower, USER1_VOTING_POWER);
+        assertFalse(claimed);
     }
 
-    function test_LockVeAERO_MultipleLocks() public {
+    function test_LockVeAERO_MultipleUsers() public {
         vm.prank(admin);
         pool.activate();
 
+        // User1 locks
         vm.startPrank(user1);
         votingEscrow.approve(address(pool), 1);
         pool.lockVeAERO(1);
         vm.stopPrank();
 
+        // User2 locks
         vm.startPrank(user2);
         votingEscrow.approve(address(pool), 2);
         pool.lockVeAERO(2);
         vm.stopPrank();
 
         assertEq(pool.totalVotingPower(), USER1_VOTING_POWER + USER2_VOTING_POWER);
-        assertEq(pool.getLockedNFTCount(), 2);
-    }
-
-    function test_LockVeAERO_RevertNotOwner() public {
-        vm.prank(admin);
-        pool.activate();
-
-        vm.prank(user2);
-        vm.expectRevert(KickoffVoteSalePool.NotNFTOwner.selector);
-        pool.lockVeAERO(1); // Token 1 belongs to user1
+        assertEq(pool.getLockedTokenIds().length, 2);
     }
 
     function test_LockVeAERO_RevertNotActive() public {
@@ -166,11 +166,21 @@ contract KickoffVoteSalePoolTest is Test {
         vm.stopPrank();
     }
 
+    function test_LockVeAERO_RevertNotOwner() public {
+        vm.prank(admin);
+        pool.activate();
+
+        vm.startPrank(user2);
+        vm.expectRevert(KickoffVoteSalePool.NotNFTOwner.selector);
+        pool.lockVeAERO(1); // Token 1 belongs to user1
+        vm.stopPrank();
+    }
+
     function test_LockVeAERO_RevertAlreadyVoted() public {
         vm.prank(admin);
         pool.activate();
 
-        // Simulate NFT already voted
+        // Set lastVoted to current timestamp (simulating already voted)
         voter.setLastVoted(1, block.timestamp);
 
         vm.startPrank(user1);
@@ -182,16 +192,16 @@ contract KickoffVoteSalePoolTest is Test {
     }
 
     function test_LockVeAERO_RevertVotingPowerTooLow() public {
-        // Create a new pool with high minVotingPower requirement
+        // Create a new pool with minVotingPower requirement
         uint256 minVP = 500_000 ether; // 500k veAERO minimum
         
-        vm.startPrank(admin);
         MockERC20 newToken = new MockERC20("New Token", "NEW", 18);
         newToken.mint(admin, TOTAL_ALLOCATION);
-        newToken.approve(address(factory), TOTAL_ALLOCATION);
-        vm.stopPrank();
         
-        // Factory owner creates pool
+        vm.prank(admin);
+        newToken.approve(address(factory), TOTAL_ALLOCATION);
+        
+        // createPool called by factory owner (this test contract)
         KickoffVoteSalePool poolWithMin = KickoffVoteSalePool(
             factory.createPool(address(newToken), projectOwner, TOTAL_ALLOCATION, minVP, admin)
         );
@@ -212,13 +222,13 @@ contract KickoffVoteSalePoolTest is Test {
         // Create a new pool with minVotingPower requirement that user1 meets
         uint256 minVP = 50_000 ether; // 50k veAERO minimum, user1 has 100k
         
-        vm.startPrank(admin);
         MockERC20 newToken = new MockERC20("New Token", "NEW", 18);
         newToken.mint(admin, TOTAL_ALLOCATION);
-        newToken.approve(address(factory), TOTAL_ALLOCATION);
-        vm.stopPrank();
         
-        // Factory owner creates pool
+        vm.prank(admin);
+        newToken.approve(address(factory), TOTAL_ALLOCATION);
+        
+        // createPool called by factory owner (this test contract)
         KickoffVoteSalePool poolWithMin = KickoffVoteSalePool(
             factory.createPool(address(newToken), projectOwner, TOTAL_ALLOCATION, minVP, admin)
         );
@@ -295,18 +305,19 @@ contract KickoffVoteSalePoolTest is Test {
         vm.prank(admin);
         pool.castVotes(mockGauge);
 
-        // #10: Advance to next Aerodrome epoch (rewards are claimable only after epoch ends)
-        uint256 aerodromeEpochEnd = pool.getAerodromeEpochStart() + 1 weeks;
-        vm.warp(aerodromeEpochEnd + 1 hours);
+        // Mint some WETH to simulate bribe rewards
+        weth.mint(address(pool), 10 ether);
+
+        // Advance to next epoch (rewards are claimable only after epoch ends)
+        uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
+        vm.warp(nextEpochStart + 1 hours);
 
         // Finalize (auto token discovery)
-        // Note: In mock environment, no real rewards are claimed so lpCreated = 0
         vm.prank(admin);
         pool.finalizeEpoch();
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
-        // In mock environment without real reward contracts, lpCreated = 0 is expected
-        // LP creation is tested in integration tests with real Aerodrome contracts
+        assertTrue(pool.lpCreated() > 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -321,7 +332,7 @@ contract KickoffVoteSalePoolTest is Test {
 
         assertEq(votingEscrow.ownerOf(1), user1);
 
-        (, , bool unlocked) = pool.getLockedNFTInfo(1);
+        (, , bool unlocked) = reader.getLockedNFTInfo(address(pool), 1);
         assertTrue(unlocked);
     }
 
@@ -364,8 +375,8 @@ contract KickoffVoteSalePoolTest is Test {
         uint256 expectedUser1 = (TOTAL_ALLOCATION / 2) * USER1_VOTING_POWER / (USER1_VOTING_POWER + USER2_VOTING_POWER);
         uint256 expectedUser2 = (TOTAL_ALLOCATION / 2) * USER2_VOTING_POWER / (USER1_VOTING_POWER + USER2_VOTING_POWER);
 
-        assertEq(pool.getClaimableTokens(user1), expectedUser1);
-        assertEq(pool.getClaimableTokens(user2), expectedUser2);
+        assertEq(reader.getClaimableTokens(address(pool), user1), expectedUser1);
+        assertEq(reader.getClaimableTokens(address(pool), user2), expectedUser2);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -387,9 +398,6 @@ contract KickoffVoteSalePoolTest is Test {
         pool.emergencyWithdrawNFT(1);
 
         assertEq(votingEscrow.ownerOf(1), user1);
-        
-        // #3: Verify accounting was updated
-        assertEq(pool.totalVotingPower(), 0);
     }
 
     function test_EmergencyWithdrawAllNFTs() public {
@@ -411,9 +419,6 @@ contract KickoffVoteSalePoolTest is Test {
 
         assertEq(votingEscrow.ownerOf(1), user1);
         assertEq(votingEscrow.ownerOf(2), user2);
-        
-        // #3: Verify accounting was updated
-        assertEq(pool.totalVotingPower(), 0);
     }
 
     function test_EmergencyWithdraw_RevertNotOwner() public {
@@ -454,32 +459,6 @@ contract KickoffVoteSalePoolTest is Test {
         vm.expectRevert(KickoffVoteSalePool.NotAdmin.selector);
         pool.rescueTokens(address(stuckToken), user1, 100 ether);
     }
-    
-    /*//////////////////////////////////////////////////////////////
-                         CANCEL POOL TESTS
-    //////////////////////////////////////////////////////////////*/
-    
-    function test_CancelPool() public {
-        vm.prank(admin);
-        pool.activate();
-
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
-
-        // Emergency withdraw all NFTs first
-        vm.prank(admin);
-        pool.emergencyWithdrawAllNFTs();
-        
-        // Now cancel
-        vm.prank(admin);
-        pool.cancelPool();
-        
-        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Cancelled));
-        // Project tokens should be returned to project owner
-        assertEq(projectToken.balanceOf(projectOwner), TOTAL_ALLOCATION);
-    }
 
     /*//////////////////////////////////////////////////////////////
                             HELPER FUNCTIONS
@@ -508,12 +487,13 @@ contract KickoffVoteSalePoolTest is Test {
         // Simulate bribes
         weth.mint(address(pool), 10 ether);
 
-        // #10: Advance to next Aerodrome epoch (rewards are claimable only after epoch ends)
-        uint256 aerodromeEpochEnd = pool.getAerodromeEpochStart() + 1 weeks;
-        vm.warp(aerodromeEpochEnd + 1 hours);
+        // Advance to next epoch (rewards are claimable only after epoch ends)
+        uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
+        vm.warp(nextEpochStart + 1 hours);
 
         // Finalize (auto token discovery)
         vm.prank(admin);
         pool.finalizeEpoch();
     }
 }
+

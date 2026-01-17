@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {KickoffFactory} from "../../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../../src/KickoffVoteSalePool.sol";
+import {KickoffPoolReader} from "../../src/KickoffPoolReader.sol";
 import {LPLocker} from "../../src/LPLocker.sol";
 import {IVotingEscrow} from "../../src/interfaces/IVotingEscrow.sol";
 import {IVoter} from "../../src/interfaces/IVoter.sol";
@@ -38,6 +39,7 @@ contract RealVeAEROTest is Test {
     // ============ STATE ============
     KickoffFactory public factory;
     KickoffVoteSalePool public pool;
+    KickoffPoolReader public reader;
     LPLocker public lpLocker;
     MockToken public projectToken;
 
@@ -58,6 +60,7 @@ contract RealVeAEROTest is Test {
         // Deploy factory (this contract becomes owner)
         factory = new KickoffFactory(VOTING_ESCROW, VOTER, ROUTER, WETH);
         lpLocker = factory.lpLocker();
+        reader = new KickoffPoolReader();
 
         // Admin approves tokens
         vm.prank(admin);
@@ -195,8 +198,8 @@ contract RealVeAEROTest is Test {
         uint256 totalClaimed = 0;
         
         for (uint256 i = 0; i < tokenIds.length; i++) {
-            (address owner,,) = pool.getLockedNFTInfo(tokenIds[i]);
-            uint256 claimable = pool.getClaimableTokens(owner);
+            (address owner,,) = reader.getLockedNFTInfo(address(pool), tokenIds[i]);
+            uint256 claimable = reader.getClaimableTokens(address(pool), owner);
             
             vm.prank(owner);
             pool.unlockVeAERO(tokenIds[i]);

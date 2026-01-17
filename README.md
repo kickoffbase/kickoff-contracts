@@ -47,13 +47,14 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 │  - Creates PROJECT/WETH liquidity                               │
 │  - Distributes project tokens to participants                   │
 └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         LPLocker                                │
-│  - Permanently locks LP tokens                                  │
-│  - Distributes trading fees (30% admin / 70% project)           │
-└─────────────────────────────────────────────────────────────────┘
+           │                                    │
+           ▼                                    ▼
+┌───────────────────────────┐    ┌─────────────────────────────────┐
+│      KickoffPoolReader    │    │           LPLocker              │
+│  - View functions         │    │  - Permanently locks LP tokens  │
+│  - Pool state queries     │    │  - Distributes trading fees     │
+│  - Reward calculations    │    │    (30% admin / 70% project)    │
+└───────────────────────────┘    └─────────────────────────────────┘
 ```
 
 ## Contracts
@@ -72,6 +73,7 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 |----------|-------------|
 | `KickoffFactory` | Factory for creating Vote-Sale pools |
 | `KickoffVoteSalePool` | Main pool contract for vote-sale mechanism |
+| `KickoffPoolReader` | Read-only contract for pool state queries and reward calculations |
 | `LPLocker` | Permanently locks LP tokens, distributes trading fees |
 | `EpochLib` | Library for Aerodrome epoch calculations |
 
@@ -148,16 +150,21 @@ BASESCAN_API_KEY=your_api_key
 
 ### Deploy All Contracts
 
+Deploys: `KickoffFactory`, `LPLocker`, `KickoffPoolReader`, `TokenVesting`, `ProjectTokenFactory`
+
 ```bash
 source .env
 forge script script/Deploy.s.sol:Deploy \
   --rpc-url https://sepolia.base.org \
   --broadcast \
   --verify \
+  --etherscan-api-key $BASESCAN_API_KEY \
   -vvvv
 ```
 
 ### Deploy Only Token Factory
+
+Deploys: `TokenVesting`, `ProjectTokenFactory`
 
 ```bash
 source .env
@@ -165,10 +172,13 @@ forge script script/Deploy.s.sol:DeployTokenFactoryOnly \
   --rpc-url https://sepolia.base.org \
   --broadcast \
   --verify \
+  --etherscan-api-key $BASESCAN_API_KEY \
   -vvvv
 ```
 
 ### Deploy Only Vote-Sale
+
+Deploys: `KickoffFactory`, `LPLocker`, `KickoffPoolReader`
 
 ```bash
 source .env
@@ -176,6 +186,19 @@ forge script script/Deploy.s.sol:DeployVoteSaleOnly \
   --rpc-url https://sepolia.base.org \
   --broadcast \
   --verify \
+  --etherscan-api-key $BASESCAN_API_KEY \
+  -vvvv
+```
+
+### Deploy Only Pool Reader
+
+```bash
+source .env
+forge script script/Deploy.s.sol:DeployPoolReader \
+  --rpc-url https://sepolia.base.org \
+  --broadcast \
+  --verify \
+  --etherscan-api-key $BASESCAN_API_KEY \
   -vvvv
 ```
 
@@ -267,29 +290,57 @@ uint256 claimable = vesting.getClaimable(lockId);
 #### For Admins (Project Creators)
 
 ```solidity
-// 1. Create Pool
-factory.createPool(projectToken, projectOwner, totalAllocation, minVotingPower)
+// 1. Create Pool (onlyOwner on factory)
+factory.createPool(projectToken, projectOwner, totalAllocation, minVotingPower, poolAdmin)
 
 // 2. Activate Pool
 pool.activate()
 
 // 3. Cast Votes (after veAERO holders lock)
 pool.castVotes(gaugeAddress)
+// Or batch voting for many NFTs:
+pool.castVotesBatch(gaugeAddress, batchSize)
 
 // 4. Finalize (after epoch ends)
 pool.finalizeEpoch()
+// Or batch finalization for many NFTs:
+pool.startClaimRewardsBatch(batchSize)
+pool.continueClaimRewardsBatch(batchSize)  // repeat until done
+pool.completeFinalization()
 ```
 
 #### For veAERO Holders
 
 ```solidity
-// 1. Lock veAERO
-veAERO.setApprovalForAll(poolAddress, true)
+// 1. Lock veAERO (must have no unclaimed rewards from previous epoch)
+veAERO.approve(poolAddress, tokenId)
 pool.lockVeAERO(tokenId)
 
 // 2. Unlock & Claim (after finalization)
 pool.unlockVeAERO(tokenId)
 pool.claimProjectTokens()
+```
+
+#### Using KickoffPoolReader (View Functions)
+
+```solidity
+KickoffPoolReader reader = KickoffPoolReader(readerAddress);
+
+// Get pool info
+uint256 lockedCount = reader.getLockedNFTCount(pool);
+uint256[] memory tokenIds = reader.getLockedTokenIds(pool);
+(address owner, uint256 vp, bool unlocked) = reader.getLockedNFTInfo(pool, tokenId);
+
+// Get rewards info
+(address[] memory feesTokens, address[] memory bribeTokens) = reader.getAvailableRewardTokens(pool);
+(uint256[] memory feesEarned, uint256[] memory bribesEarned) = reader.getPendingRewards(pool, tokenId, rewardTokens);
+
+// Get claimable project tokens
+uint256 claimable = reader.getClaimableTokens(pool, userAddress);
+
+// Get progress
+(uint256 processed, uint256 total, bool inProgress) = reader.getVotingProgress(pool);
+(uint256 processed, uint256 total, bool inProgress) = reader.getFinalizeProgress(pool);
 ```
 
 ## Aerodrome Integration
@@ -305,17 +356,22 @@ Contracts integrate with Aerodrome on Base:
 
 ## Security
 
-- Audited: [Pending]
+- **Audited by Halborn** ✅
 
 ### Key Security Features
 
-- **ReentrancyGuard** on all claim functions
+- **ReentrancyGuard** on all critical functions
 - **Two-step ownership** transfer (Ownable2Step pattern)
 - **Input validation** on all parameters
 - **MAX_ALLOCATIONS** limit (50) prevents gas DoS
-- **Emergency rescue** for stuck tokens (only excess, not vested)
+- **Emergency rescue** for stuck tokens
 - **Slippage protection** for swaps and liquidity
 - **Batch processing** to avoid gas limits
+- **Historical rewards check** (FIND-017) - prevents locking NFTs with unclaimed rewards
+- **Deactivated NFT handling** (FIND-002) - gracefully skips deactivated veAERO
+- **Epoch alignment** (FIND-004/012) - ensures voting within Aerodrome epoch boundaries
+- **Pool cancellation** (FIND-007/020) - allows recovery if no participants
+- **Pull-based fee distribution** (FIND-018) - prevents DoS on LPLocker
 
 ## License
 
