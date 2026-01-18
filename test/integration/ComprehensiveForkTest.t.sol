@@ -793,30 +793,17 @@ contract ComprehensiveForkTest is Test {
         console.log("   QUICK BATCH FINALIZATION TEST (5 NFTs)");
         console.log("================================================================");
 
-        // IMPORTANT: Move 2 epochs forward BEFORE activation
-        // This ensures that NFTs that voted 2+ epochs ago have no unclaimed rewards
-        // (Aerodrome rewards expire after ~1 epoch)
-        uint256 currentEpoch = block.timestamp / 1 weeks;
-        uint256 targetEpoch = currentEpoch + 2; // 2 epochs forward
-        uint256 targetEpochStart = targetEpoch * 1 weeks;
-        vm.warp(targetEpochStart + 1 hours); // 1 hour into target epoch
-        vm.roll(block.number + 100800); // ~14 days of blocks
-        
-        console.log("Warped to epoch:", block.timestamp / 1 weeks);
-        console.log("Timestamp:", block.timestamp);
-
-        // Activate pool (now aerodromeEpochStart = target epoch start)
+        // Activate pool
         vm.prank(admin);
         pool.activate();
         console.log("Pool activated, aerodromeEpochStart:", pool.aerodromeEpochStart());
 
-        // Lock NFTs - scan through ALL NFT_IDS to find ones that can be locked
-        // (those without unclaimed historical rewards)
+        // Lock 5 NFTs
         uint256 epochStart = (block.timestamp / 1 weeks) * 1 weeks;
         uint256 targetLocked = 5;
         
         console.log("");
-        console.log("Scanning NFTs for eligible ones...");
+        console.log("Locking NFTs...");
         
         for (uint256 i = 0; i < NFT_IDS.length && lockedNftIds.length < targetLocked; i++) {
             uint256 tokenId = NFT_IDS[i];
@@ -838,7 +825,7 @@ contract ComprehensiveForkTest is Test {
                 continue;
             }
             
-            // Try to lock - will fail if has unclaimed rewards
+            // Lock NFT
             vm.startPrank(owner);
             ve.approve(address(pool), tokenId);
             try pool.lockVeAERO(tokenId) {
@@ -847,20 +834,14 @@ contract ComprehensiveForkTest is Test {
                 totalLockedVP += vp;
                 console.log("  NFT #%d locked, VP: %s", tokenId, vp / 1e18);
             } catch {
-                console.log("  NFT #%d: has unclaimed rewards (skipped)", tokenId);
+                console.log("  NFT #%d: failed to lock", tokenId);
             }
             vm.stopPrank();
         }
 
         console.log("");
         console.log("Locked NFTs: %d", lockedNftIds.length);
-        
-        if (lockedNftIds.length == 0) {
-            console.log("WARNING: No eligible NFTs found. All have unclaimed rewards.");
-            console.log("This is expected behavior - test demonstrates FIND-017 protection.");
-            vm.skip(true);
-            return;
-        }
+        require(lockedNftIds.length >= 1, "Need at least 1 NFT");
         
         console.log("TOTAL LOCKED: %d NFTs, %s veAERO", lockedNftIds.length, totalLockedVP / 1e18);
 

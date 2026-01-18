@@ -367,7 +367,6 @@ Contracts integrate with Aerodrome on Base:
 - **Emergency rescue** for stuck tokens
 - **Slippage protection** for swaps and liquidity
 - **Batch processing** to avoid gas limits
-- **Historical rewards check** (FIND-017) - prevents locking NFTs with unclaimed rewards
 - **Deactivated NFT handling** (FIND-002) - gracefully skips deactivated veAERO
 - **Epoch alignment** (FIND-004/012) - ensures voting within Aerodrome epoch boundaries
 - **Pool cancellation** (FIND-007/020) - allows recovery if no participants

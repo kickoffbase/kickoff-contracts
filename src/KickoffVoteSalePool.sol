@@ -61,7 +61,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error VotingPowerTooLow();
     error NFTDeactivated();
     error PoolCancelled();
-    error HasUnclaimedRewards();
     error NoParticipants();
     error InvalidDeadline();
     error NotAllClaimed();
@@ -357,13 +356,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (votingPowerAmount < minVotingPower) {
             revert VotingPowerTooLow();
         }
-        
-        // #17: Check for unclaimed rewards (optional - can be disabled for gas)
-        // Note: This check is gas-intensive, so we make it optional via try-catch
-        // Users should claim their rewards before locking
-        if (_hasUnclaimedHistoricalRewards(tokenId)) {
-            revert HasUnclaimedRewards();
-        }
 
         // Transfer NFT to this contract
         votingEscrow.safeTransferFrom(msg.sender, address(this), tokenId);
@@ -383,20 +375,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
         totalVotingPower += votingPowerAmount;
 
         emit VeAEROLocked(msg.sender, tokenId, votingPowerAmount);
-    }
-    
-    /// @notice Check if an NFT has unclaimed historical rewards
-    /// @dev This is a simplified check - in production may want to check specific gauges
-    function _hasUnclaimedHistoricalRewards(uint256 tokenId) internal view returns (bool) {
-        // For now, we check if lastVoted > 0 which means NFT has voted before
-        // A more thorough check would iterate known gauges, but that's gas prohibitive
-        // Users are expected to claim rewards before locking
-        uint256 lastVoted = voter.lastVoted(tokenId);
-        if (lastVoted == 0) return false;
-        
-        // If voted in a previous epoch, there might be unclaimed rewards
-        // This is a conservative check - user should claim before locking
-        return lastVoted < aerodromeEpochStart && lastVoted > 0;
     }
 
     /*//////////////////////////////////////////////////////////////
