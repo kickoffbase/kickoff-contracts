@@ -203,9 +203,9 @@ contract AuditEdgeCasesTest is Test {
 
         uint256 totalClaimed = 0;
 
-        // Claim every 10 days
+        // Claim every 10 days (startTime = 1 in tests)
         for (uint256 i = 1; i <= 10; i++) {
-            vm.warp(block.timestamp + 10 days);
+            vm.warp(1 + i * 10 days);
             
             uint256 claimable = vesting.getClaimable(0);
             assertTrue(claimable > 0, "Should have claimable amount");
@@ -515,19 +515,19 @@ contract AuditEdgeCasesTest is Test {
 
         vm.prank(owner);
         vesting.startVesting(token);
-        uint256 startTime = block.timestamp;
-
-        // At exactly vesting end
-        vm.warp(startTime + vestingDuration);
-        assertEq(vesting.getClaimable(0), amount, "Should be exact amount at boundary");
-
-        // 1 second before end
-        vm.warp(startTime + vestingDuration - 1);
+        
+        // Use absolute timestamps (startTime = 1 in tests)
+        // 1 second before end - should be less than total
+        vm.warp(1 + uint256(vestingDuration) - 1);
         uint256 claimableBefore = vesting.getClaimable(0);
         assertTrue(claimableBefore < amount, "Should be less than total 1 second before");
 
+        // At exactly vesting end
+        vm.warp(1 + uint256(vestingDuration));
+        assertEq(vesting.getClaimable(0), amount, "Should be exact amount at boundary");
+
         // 1 second after end
-        vm.warp(startTime + vestingDuration + 1);
+        vm.warp(1 + uint256(vestingDuration) + 1);
         assertEq(vesting.getClaimable(0), amount, "Should be capped at total after end");
     }
 
@@ -551,6 +551,7 @@ contract AuditEdgeCasesTest is Test {
     /// @notice Test: Behavior at exact cliff end timestamp
     function test_EdgeCase_ExactCliffEnd() public {
         uint32 cliffDuration = uint32(30 days);
+        uint32 vestingDuration = uint32(60 days);
 
         ProjectTokenFactory.TokenAllocation[] memory allocations = new ProjectTokenFactory.TokenAllocation[](1);
         allocations[0] = ProjectTokenFactory.TokenAllocation({
@@ -559,7 +560,7 @@ contract AuditEdgeCasesTest is Test {
             amount: TOTAL_SUPPLY,
             tgePercent: 0,
             cliffDuration: cliffDuration,
-            vestingDuration: uint32(60 days)
+            vestingDuration: vestingDuration
         });
 
         vm.prank(owner);
@@ -567,18 +568,18 @@ contract AuditEdgeCasesTest is Test {
 
         vm.prank(owner);
         vesting.startVesting(token);
-        uint256 startTime = block.timestamp;
-
+        
+        // Use absolute timestamps (startTime = 1 in tests)
         // 1 second before cliff ends - nothing claimable
-        vm.warp(startTime + cliffDuration - 1);
+        vm.warp(1 + uint256(cliffDuration) - 1);
         assertEq(vesting.getClaimable(0), 0, "Should be 0 before cliff");
 
         // Exactly at cliff end - linear vesting starts, 0 vested yet
-        vm.warp(startTime + cliffDuration);
+        vm.warp(1 + uint256(cliffDuration));
         assertEq(vesting.getClaimable(0), 0, "Should be 0 at exact cliff end");
 
         // 1 second after cliff - small amount vested
-        vm.warp(startTime + cliffDuration + 1);
+        vm.warp(1 + uint256(cliffDuration) + 1);
         assertTrue(vesting.getClaimable(0) > 0, "Should have vested after cliff");
     }
 }

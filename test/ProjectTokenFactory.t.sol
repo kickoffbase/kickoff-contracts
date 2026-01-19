@@ -486,15 +486,16 @@ contract ProjectTokenFactoryTest is Test {
         vm.prank(owner);
         vesting.startVesting(token);
 
+        // Use absolute timestamps (startTime = 1 in tests)
         // During cliff - nothing claimable
         assertEq(vesting.getClaimable(0), 0);
 
-        // After cliff - start vesting
-        vm.warp(block.timestamp + 30 days);
+        // After cliff - start vesting (30 days)
+        vm.warp(1 + 30 days);
         assertEq(vesting.getClaimable(0), 0);
 
-        // 30 days into vesting (1/3)
-        vm.warp(block.timestamp + 30 days);
+        // 30 days into vesting (60 days total = 1/3 of 90 day vesting)
+        vm.warp(1 + 60 days);
         assertApproxEqAbs(vesting.getClaimable(0), vestingAmount / 3, 1e18);
 
         // Claim partial
@@ -502,8 +503,8 @@ contract ProjectTokenFactoryTest is Test {
         vesting.claim(0);
         assertApproxEqAbs(IERC20(token).balanceOf(teamLockOwner), vestingAmount / 3, 1e18);
 
-        // 60 more days - full vest
-        vm.warp(block.timestamp + 60 days);
+        // Full vest (30 days cliff + 90 days vesting = 120 days total)
+        vm.warp(1 + 120 days);
         
         // Claim remaining
         vm.prank(teamLockOwner);

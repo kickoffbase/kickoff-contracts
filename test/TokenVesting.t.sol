@@ -214,16 +214,17 @@ contract TokenVestingTest is Test {
         vm.prank(owner);
         vesting.startVesting(address(token));
 
+        // Use absolute timestamps (startTime = 1 in tests)
         // 25% after 25 days
-        vm.warp(block.timestamp + 25 days);
+        vm.warp(1 + 25 days);
         assertEq(vesting.getClaimable(lockId), LOCK_AMOUNT * 25 / 100);
 
         // 50% after 50 days
-        vm.warp(block.timestamp + 25 days);
+        vm.warp(1 + 50 days);
         assertEq(vesting.getClaimable(lockId), LOCK_AMOUNT * 50 / 100);
 
         // 100% after 100 days
-        vm.warp(block.timestamp + 50 days);
+        vm.warp(1 + 100 days);
         assertEq(vesting.getClaimable(lockId), LOCK_AMOUNT);
 
         vm.prank(beneficiary);
@@ -238,20 +239,21 @@ contract TokenVestingTest is Test {
         vm.prank(owner);
         vesting.startVesting(address(token));
 
+        // Use absolute timestamps (startTime = 1 in tests)
         // During cliff - nothing
-        vm.warp(block.timestamp + 15 days);
+        vm.warp(1 + 15 days);
         assertEq(vesting.getClaimable(lockId), 0);
 
         // Cliff ends, vesting starts
-        vm.warp(block.timestamp + 15 days); // now at 30 days
+        vm.warp(1 + 30 days);
         assertEq(vesting.getClaimable(lockId), 0);
 
-        // 50% of vesting after 50 more days
-        vm.warp(block.timestamp + 50 days); // now at 80 days
+        // 50% of vesting after 50 more days (80 days total)
+        vm.warp(1 + 80 days);
         assertEq(vesting.getClaimable(lockId), LOCK_AMOUNT * 50 / 100);
 
-        // Full amount after cliff + vesting
-        vm.warp(block.timestamp + 50 days); // now at 130 days
+        // Full amount after cliff + vesting (130 days total)
+        vm.warp(1 + 130 days);
         assertEq(vesting.getClaimable(lockId), LOCK_AMOUNT);
     }
 
