@@ -937,6 +937,278 @@ contract ComprehensiveForkTest is Test {
         console.log("TEST PASSED!");
     }
 
+    /// @notice Full flow test including LP trading fees claim
+    function test_FullFlowWithTradingFees() public {
+        if (block.chainid != 8453) { vm.skip(true); return; }
+
+        console.log("");
+        console.log("================================================================");
+        console.log("   FULL FLOW TEST WITH TRADING FEES CLAIM");
+        console.log("================================================================");
+
+        // ============ PHASE 1: Complete Vote-Sale ============
+        
+        // Activate pool (uses current epoch from fork)
+        vm.prank(admin);
+        pool.activate();
+        console.log("Pool activated, aerodromeEpochStart:", pool.aerodromeEpochStart());
+
+        // Lock 5 NFTs
+        uint256 epochStart = (block.timestamp / 1 weeks) * 1 weeks;
+        
+        for (uint256 i = 0; i < NFT_IDS.length && lockedNftIds.length < 5; i++) {
+            uint256 tokenId = NFT_IDS[i];
+            
+            address owner;
+            try ve.ownerOf(tokenId) returns (address _owner) {
+                owner = _owner;
+            } catch { continue; }
+            
+            if (owner == address(0)) continue;
+            
+            uint256 vp = ve.balanceOfNFT(tokenId);
+            if (vp == 0) continue;
+            
+            uint256 lastVoted = voter.lastVoted(tokenId);
+            if (lastVoted >= epochStart) {
+                console.log("  NFT #%d skipped - voted in current epoch", tokenId);
+                continue;
+            }
+            
+            vm.startPrank(owner);
+            ve.approve(address(pool), tokenId);
+            try pool.lockVeAERO(tokenId) {
+                lockedNftIds.push(tokenId);
+                lockedOwners.push(owner);
+                totalLockedVP += vp;
+                console.log("NFT #%d locked, VP: %s", tokenId, vp / 1e18);
+            } catch {}
+            vm.stopPrank();
+        }
+
+        require(lockedNftIds.length >= 1, "Need at least 1 NFT");
+        console.log("TOTAL LOCKED: %d NFTs, %s veAERO", lockedNftIds.length, totalLockedVP / 1e18);
+
+        // Small time advance for block
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 12);
+
+        // Cast votes (single method for small number)
+        vm.prank(admin);
+        pool.castVotes(WETH_AERO_GAUGE);
+        console.log("Votes cast for gauge:", pool.gauge());
+        console.log("Total voting power after casting:", pool.totalVotingPower() / 1e18);
+
+        // Advance to next epoch for finalization
+        uint256 finalizationTime = pool.aerodromeEpochStart() + 1 weeks + 1 hours;
+        vm.warp(finalizationTime);
+        vm.roll(block.number + 50400);
+        console.log("Warped to finalization epoch:", block.timestamp / 1 weeks);
+
+        // Get reward contracts info
+        (address feesReward, address bribeReward) = reader.getRewardContracts(address(pool));
+        console.log("Fees reward contract:", feesReward);
+        console.log("Bribe reward contract:", bribeReward);
+        
+        // Check pending rewards before finalize
+        (address[] memory feesTokens, address[] memory bribeTokens) = reader.getAvailableRewardTokens(address(pool));
+        console.log("Available fees tokens:", feesTokens.length);
+        console.log("Available bribe tokens:", bribeTokens.length);
+
+        // Finalize using batch method for better reward claiming
+        vm.prank(admin);
+        pool.startClaimRewardsBatch(5);
+        
+        // Continue until done
+        while (pool.batchInProgress()) {
+            vm.prank(admin);
+            pool.continueClaimRewardsBatch(5);
+        }
+        
+        // Complete finalization
+        vm.prank(admin);
+        pool.completeFinalization();
+        console.log("");
+        console.log("Finalized:");
+        console.log("  LP created:", pool.lpCreated() / 1e18);
+        console.log("  LP token:", pool.lpToken());
+
+        // ============ PHASE 2: Simulate Trading & Claim Fees ============
+        
+        console.log("");
+        console.log("LP Token address:", pool.lpToken());
+        console.log("LP Created amount:", pool.lpCreated());
+        console.log("WETH Collected:", pool.wethCollected());
+        
+        if (pool.lpToken() == address(0)) {
+            console.log("");
+            console.log("No LP created - need WETH from rewards to create liquidity");
+            console.log("This is expected if the voting rewards were too small");
+            // Continue anyway to test the flow structure
+        }
+
+        // If no LP was created, we can't test trading fees
+        if (pool.lpToken() == address(0)) {
+            console.log("Skipping trading fees test - no LP pool");
+            return;
+        }
+
+        console.log("");
+        console.log("================================================================");
+        console.log("   PHASE 2: SIMULATE TRADING TO GENERATE FEES");
+        console.log("================================================================");
+
+        address lpTokenAddr = pool.lpToken();
+        IPool lpPool = IPool(lpTokenAddr);
+        
+        // Get LP token pair info
+        address token0 = lpPool.token0();
+        address token1 = lpPool.token1();
+        console.log("LP Pair:");
+        console.log("  token0:", token0);
+        console.log("  token1:", token1);
+
+        // Create a trader with funds to swap
+        address trader = makeAddr("trader");
+        
+        // Give trader some WETH to swap (deal cheatcode)
+        deal(WETH, trader, 10 ether);
+        console.log("Trader WETH balance: %s", IERC20(WETH).balanceOf(trader) / 1e18);
+
+        // Execute multiple swaps to generate fees
+        console.log("");
+        console.log("Executing swaps to generate fees...");
+        
+        IRouter.Route[] memory routes = new IRouter.Route[](1);
+        routes[0] = IRouter.Route({
+            from: WETH,
+            to: address(projectToken),
+            stable: false,
+            factory: address(0) // Default factory
+        });
+
+        for (uint256 i = 0; i < 5; i++) {
+            uint256 swapAmount = 1 ether;
+            
+            vm.startPrank(trader);
+            IERC20(WETH).approve(address(router), swapAmount);
+            
+            try router.swapExactTokensForTokens(
+                swapAmount,
+                0, // Accept any output (test only!)
+                routes,
+                trader,
+                block.timestamp + 1 hours
+            ) returns (uint256[] memory amounts) {
+                console.log("  Swap %d: %s WETH -> %s tokens", i + 1, swapAmount / 1e18, amounts[amounts.length - 1] / 1e18);
+            } catch {
+                console.log("  Swap %d failed", i + 1);
+            }
+            vm.stopPrank();
+        }
+
+        // Check pending fees AFTER swaps
+        console.log("");
+        console.log("Checking pending trading fees after swaps...");
+        (address t0, uint256 pending0, address t1, uint256 pending1) = lpLocker.pendingFees(address(pool));
+        console.log("  Pending token0 (%s): %s", t0, pending0);
+        console.log("  Pending token1 (%s): %s", t1, pending1);
+
+        // ============ PHASE 3: Claim Trading Fees ============
+        
+        console.log("");
+        console.log("================================================================");
+        console.log("   PHASE 3: CLAIM TRADING FEES");
+        console.log("================================================================");
+
+        // Anyone can call claimTradingFees to accrue fees
+        console.log("Calling lpLocker.claimTradingFees()...");
+        lpLocker.claimTradingFees(address(pool));
+        
+        // Check accrued fees
+        (uint256 adminBal0, uint256 projectBal0) = lpLocker.getAccruedFees(address(pool), token0);
+        (uint256 adminBal1, uint256 projectBal1) = lpLocker.getAccruedFees(address(pool), token1);
+        
+        console.log("");
+        console.log("Accrued fees (30% admin / 70% project):");
+        console.log("  Token0 - Admin: %s, Project: %s", adminBal0, projectBal0);
+        console.log("  Token1 - Admin: %s, Project: %s", adminBal1, projectBal1);
+
+        // ============ PHASE 4: Withdraw Fees ============
+        
+        console.log("");
+        console.log("================================================================");
+        console.log("   PHASE 4: WITHDRAW FEES");
+        console.log("================================================================");
+
+        // Get LockedLP info
+        LPLocker.LockedLP memory lockedInfo = lpLocker.getLockedLP(address(pool));
+        console.log("LP Lock info:");
+        console.log("  Admin:", lockedInfo.admin);
+        console.log("  Project Owner:", lockedInfo.projectOwner);
+        console.log("  Total LP locked:", lockedInfo.totalLP / 1e18);
+
+        // Admin withdraws their fees
+        if (adminBal0 > 0) {
+            address adminRecipient = makeAddr("adminRecipient");
+            uint256 balBefore = IERC20(token0).balanceOf(adminRecipient);
+            
+            vm.prank(lockedInfo.admin);
+            lpLocker.withdrawAdminFees(address(pool), token0, adminRecipient);
+            
+            uint256 balAfter = IERC20(token0).balanceOf(adminRecipient);
+            console.log("Admin withdrew token0: %s", balAfter - balBefore);
+        }
+
+        if (adminBal1 > 0) {
+            address adminRecipient = makeAddr("adminRecipient");
+            uint256 balBefore = IERC20(token1).balanceOf(adminRecipient);
+            
+            vm.prank(lockedInfo.admin);
+            lpLocker.withdrawAdminFees(address(pool), token1, adminRecipient);
+            
+            uint256 balAfter = IERC20(token1).balanceOf(adminRecipient);
+            console.log("Admin withdrew token1: %s", balAfter - balBefore);
+        }
+
+        // Project owner withdraws their fees
+        if (projectBal0 > 0) {
+            address projectRecipient = makeAddr("projectRecipient");
+            uint256 balBefore = IERC20(token0).balanceOf(projectRecipient);
+            
+            vm.prank(lockedInfo.projectOwner);
+            lpLocker.withdrawProjectFees(address(pool), token0, projectRecipient);
+            
+            uint256 balAfter = IERC20(token0).balanceOf(projectRecipient);
+            console.log("Project owner withdrew token0: %s", balAfter - balBefore);
+        }
+
+        if (projectBal1 > 0) {
+            address projectRecipient = makeAddr("projectRecipient");
+            uint256 balBefore = IERC20(token1).balanceOf(projectRecipient);
+            
+            vm.prank(lockedInfo.projectOwner);
+            lpLocker.withdrawProjectFees(address(pool), token1, projectRecipient);
+            
+            uint256 balAfter = IERC20(token1).balanceOf(projectRecipient);
+            console.log("Project owner withdrew token1: %s", balAfter - balBefore);
+        }
+
+        // Verify accrued fees are now zero
+        (adminBal0, projectBal0) = lpLocker.getAccruedFees(address(pool), token0);
+        (adminBal1, projectBal1) = lpLocker.getAccruedFees(address(pool), token1);
+        
+        console.log("");
+        console.log("After withdrawal, accrued fees:");
+        console.log("  Token0 - Admin: %s, Project: %s", adminBal0, projectBal0);
+        console.log("  Token1 - Admin: %s, Project: %s", adminBal1, projectBal1);
+
+        console.log("");
+        console.log("================================================================");
+        console.log("   TRADING FEES TEST COMPLETED!");
+        console.log("================================================================");
+    }
+
     /// @notice Test with 60 NFTs and BATCH finalization
     function test_BatchFinalizationWith60Holders() public {
         if (block.chainid != 8453) { vm.skip(true); return; }

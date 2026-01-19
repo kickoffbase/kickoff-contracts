@@ -1177,6 +1177,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (vp > 0 && !isSkipped[tokenId]) {
             totalVotingPower -= vp;
             userInfo[nftOwner].totalVotingPower -= vp;
+            // FIND-002/007: Decrement participant count if user has no more voting power
+            if (userInfo[nftOwner].totalVotingPower == 0) {
+                participantCount--;
+            }
         }
         
         nft.unlocked = true;
