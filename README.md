@@ -356,7 +356,7 @@ Contracts integrate with Aerodrome on Base:
 
 ## Security
 
-- **Audited by Halborn** ✅
+- **Audited by Halborn** - [View Audit Report](https://www.halborn.com/audits/kickofffun/kickoff-protocol-contracts-b5f786)
 
 ### Key Security Features
 
