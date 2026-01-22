@@ -206,6 +206,16 @@ forge script script/Deploy.s.sol:DeployPoolReader \
 
 Replace `https://sepolia.base.org` with `https://mainnet.base.org`
 
+## Deployed Contracts (Base Mainnet)
+
+| Contract | Address | Basescan |
+|----------|---------|----------|
+| **KickoffFactory** | `0xF111E0f0C87196AAD01Dd1e25c6270de6aa82814` | [View](https://basescan.org/address/0xF111E0f0C87196AAD01Dd1e25c6270de6aa82814) |
+| **LPLocker** | `0xbd6fc99016DE1495d4fe8522d9962e3DC09E7e80` | [View](https://basescan.org/address/0xbd6fc99016DE1495d4fe8522d9962e3DC09E7e80) |
+| **KickoffPoolReader** | `0xE60C4e6CE7b7c838fd27f032B1aFcA1B9daE86EC` | [View](https://basescan.org/address/0xE60C4e6CE7b7c838fd27f032B1aFcA1B9daE86EC) |
+| **TokenVesting** | `0x95Db8EdbCD86A1aD89f671EA1C615078CA789d6a` | [View](https://basescan.org/address/0x95Db8EdbCD86A1aD89f671EA1C615078CA789d6a) |
+| **ProjectTokenFactory** | `0xd433E102f57Fae184BD783B1Be2151605e2b2Ab7` | [View](https://basescan.org/address/0xd433E102f57Fae184BD783B1Be2151605e2b2Ab7) |
+
 ## Usage
 
 ### Token Factory
