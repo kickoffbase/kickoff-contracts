@@ -185,6 +185,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     
     /// @notice Track total claimed rewards in WETH equivalent
     uint256 public totalClaimedRewards;
+    
+    /// @notice WETH balance before finalization started (for accurate reward tracking)
+    uint256 private wethBeforeFinalization;
 
     /// @notice Total LP created
     uint256 public lpCreated;
@@ -604,6 +607,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
         _setState(PoolState.Finalizing);
         finalizeStep = FinalizeStep.ClaimingRewards;
         
+        // Store WETH balance before claiming (for accurate reward tracking including WETH rewards)
+        wethBeforeFinalization = weth.balanceOf(address(this));
+        
         // Auto-discover and cache reward tokens
         delete _cachedRewardTokens;
         address[] memory discovered = _discoverRewardTokens();
@@ -749,6 +755,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (block.timestamp <= aerodromeEpochEnd) revert EpochNotEnded();
         
         _setState(PoolState.Finalizing);
+        
+        // Store WETH balance before claiming (for accurate reward tracking including WETH rewards)
+        wethBeforeFinalization = weth.balanceOf(address(this));
 
         // Auto-discover reward tokens
         address[] memory rewardTokens = _discoverRewardTokens();
@@ -949,12 +958,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Convert reward tokens to WETH with slippage protection
     /// @dev #9: Skips swap when no reliable quote is available
+    /// @dev Uses wethBeforeFinalization (set at start of finalization) for accurate reward tracking
     function _convertToWETHInternal(address[] memory rewardTokens) internal {
         address routerAddr = address(router);
         address wethAddr = address(weth);
         address defaultFactory = router.defaultFactory();
-        
-        uint256 wethBefore = weth.balanceOf(address(this));
 
         uint256 length = rewardTokens.length;
         for (uint256 i = 0; i < length;) {
@@ -1006,10 +1014,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
             unchecked { ++i; }
         }
 
-        // #8: Track actual claimed rewards, not just balanceOf
+        // Track actual claimed rewards using wethBeforeFinalization
+        // This correctly accounts for WETH received directly as rewards (not swapped)
         uint256 wethAfter = weth.balanceOf(address(this));
-        totalClaimedRewards += (wethAfter - wethBefore);
-        wethCollected = wethAfter;
+        totalClaimedRewards = wethAfter - wethBeforeFinalization;
+        wethCollected = totalClaimedRewards;
     }
 
     /// @notice Calculate minimum output with slippage tolerance

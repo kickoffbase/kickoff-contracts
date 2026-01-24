@@ -4,6 +4,11 @@ pragma solidity ^0.8.24;
 import {IPool} from "./interfaces/IPool.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 
+/// @notice Interface for Aerodrome PoolFactory
+interface IPoolFactory {
+    function isPool(address pool) external view returns (bool);
+}
+
 /// @title LPLocker
 /// @notice Permanent LP lock with trading fees distribution (30% Admin / 70% Project Owner)
 /// @dev LP tokens are locked forever, only trading fees can be claimed
@@ -34,6 +39,7 @@ contract LPLocker {
     error AlreadyLocked();
     error TransferFailed();
     error ReentrancyGuardReentrantCall();
+    error InvalidPool();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -94,6 +100,9 @@ contract LPLocker {
                                  STATE
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Aerodrome PoolFactory address on Base mainnet
+    address public constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
     /// @notice Fee split for admin (30%)
     uint256 public constant ADMIN_FEE_BPS = 3000;
 
@@ -134,6 +143,12 @@ contract LPLocker {
         if (admin == address(0) || projectOwner == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         if (lockedPools[msg.sender].exists) revert AlreadyLocked();
+        
+        // SECURITY: Validate that aerodromePool is a legitimate Aerodrome pool
+        if (!IPoolFactory(AERODROME_POOL_FACTORY).isPool(aerodromePool)) revert InvalidPool();
+        
+        // On Aerodrome, LP token address IS the pool contract address
+        if (lpToken != aerodromePool) revert InvalidPool();
 
         // Transfer LP tokens to this contract
         if (!IERC20(lpToken).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
