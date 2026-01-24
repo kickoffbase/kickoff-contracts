@@ -210,11 +210,11 @@ Replace `https://sepolia.base.org` with `https://mainnet.base.org`
 
 | Contract | Address | Basescan |
 |----------|---------|----------|
-| **KickoffFactory** | `0xF111E0f0C87196AAD01Dd1e25c6270de6aa82814` | [View](https://basescan.org/address/0xF111E0f0C87196AAD01Dd1e25c6270de6aa82814) |
-| **LPLocker** | `0xbd6fc99016DE1495d4fe8522d9962e3DC09E7e80` | [View](https://basescan.org/address/0xbd6fc99016DE1495d4fe8522d9962e3DC09E7e80) |
-| **KickoffPoolReader** | `0xE60C4e6CE7b7c838fd27f032B1aFcA1B9daE86EC` | [View](https://basescan.org/address/0xE60C4e6CE7b7c838fd27f032B1aFcA1B9daE86EC) |
-| **TokenVesting** | `0x95Db8EdbCD86A1aD89f671EA1C615078CA789d6a` | [View](https://basescan.org/address/0x95Db8EdbCD86A1aD89f671EA1C615078CA789d6a) |
-| **ProjectTokenFactory** | `0xd433E102f57Fae184BD783B1Be2151605e2b2Ab7` | [View](https://basescan.org/address/0xd433E102f57Fae184BD783B1Be2151605e2b2Ab7) |
+| **KickoffFactory** | `0x9E60d5A1D9E4522eaB7C4c5De3E9f44b82f2A101` | [View](https://basescan.org/address/0x9E60d5A1D9E4522eaB7C4c5De3E9f44b82f2A101) |
+| **LPLocker** | `0x22F9cA52913cf9Be81b3934996Cb95e38B31eaFA` | [View](https://basescan.org/address/0x22F9cA52913cf9Be81b3934996Cb95e38B31eaFA) |
+| **KickoffPoolReader** | `0xe8975e19371d02b810105322b08310E444Fd89EC` | [View](https://basescan.org/address/0xe8975e19371d02b810105322b08310E444Fd89EC) |
+| **TokenVesting** | `0xDb09c6A56dDB65D2a86F14b33e6650161D5fe8E8` | [View](https://basescan.org/address/0xDb09c6A56dDB65D2a86F14b33e6650161D5fe8E8) |
+| **ProjectTokenFactory** | `0x4bAB0EF9411C3BD63Ea4FD5e13D5ABA416C6596F` | [View](https://basescan.org/address/0x4bAB0EF9411C3BD63Ea4FD5e13D5ABA416C6596F) |
 
 ## Usage
 
