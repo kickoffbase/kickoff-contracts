@@ -9,6 +9,11 @@ interface IPoolFactory {
     function isPool(address pool) external view returns (bool);
 }
 
+/// @notice Interface for KickoffFactory
+interface IKickoffFactory {
+    function isPool(address pool) external view returns (bool);
+}
+
 /// @title LPLocker
 /// @notice Permanent LP lock with trading fees distribution (30% Admin / 70% Project Owner)
 /// @dev LP tokens are locked forever, only trading fees can be claimed
@@ -40,6 +45,9 @@ contract LPLocker {
     error TransferFailed();
     error ReentrancyGuardReentrantCall();
     error InvalidPool();
+    error FactoryAlreadySet();
+    error FactoryNotSet();
+    error NotVoteSalePool();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -103,6 +111,10 @@ contract LPLocker {
     /// @notice Aerodrome PoolFactory address on Base mainnet
     address public constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
+    /// @notice KickoffFactory address (set once after deployment)
+    /// @dev Only pools created by KickoffFactory can call lockLP()
+    address public kickoffFactory;
+
     /// @notice Fee split for admin (30%)
     uint256 public constant ADMIN_FEE_BPS = 3000;
 
@@ -123,10 +135,25 @@ contract LPLocker {
     mapping(address => mapping(address => AccruedFees)) public accruedFees;
 
     /*//////////////////////////////////////////////////////////////
+                            FACTORY SETUP
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Set the KickoffFactory address (can only be called once)
+    /// @dev SECURITY: This must be called immediately after deployment by KickoffFactory constructor
+    /// @param _factory The KickoffFactory address
+    function setFactory(address _factory) external {
+        if (_factory == address(0)) revert ZeroAddress();
+        if (kickoffFactory != address(0)) revert FactoryAlreadySet();
+        kickoffFactory = _factory;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                             LOCK FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Lock LP tokens permanently
+    /// @dev SECURITY: Only callable by KickoffVoteSalePool contracts created by KickoffFactory.
+    ///      This prevents attackers from registering malicious pools to steal fees.
     /// @param lpToken The Aerodrome LP token address
     /// @param aerodromePool The Aerodrome Pool contract address
     /// @param admin The admin address (receives 30% fees)
@@ -139,6 +166,12 @@ contract LPLocker {
         address projectOwner,
         uint256 amount
     ) external {
+        // SECURITY: Ensure factory is set
+        if (kickoffFactory == address(0)) revert FactoryNotSet();
+        
+        // SECURITY: Only allow calls from legitimate KickoffVoteSalePool contracts
+        if (!IKickoffFactory(kickoffFactory).isPool(msg.sender)) revert NotVoteSalePool();
+        
         if (lpToken == address(0) || aerodromePool == address(0)) revert ZeroAddress();
         if (admin == address(0) || projectOwner == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();

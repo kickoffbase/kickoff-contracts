@@ -235,6 +235,8 @@ contract DeployVoteSaleOnly is Script {
 /**
  * @title DeployLPLockerOnly
  * @notice Deploy only LPLocker (for manual pool creation)
+ * @dev IMPORTANT: After deployment, setFactory() MUST be called to enable lockLP().
+ *      Only pools registered in the factory via isPool() can call lockLP().
  * 
  * Usage:
  *   forge script script/Deploy.s.sol:DeployLPLockerOnly \
@@ -257,6 +259,9 @@ contract DeployLPLockerOnly is Script {
 
         console.log("");
         console.log("LPLocker:", address(locker));
+        console.log("");
+        console.log("IMPORTANT: Call setFactory(factoryAddress) to enable lockLP()");
+        console.log("Only pools registered via factory.isPool() can lock LP tokens.");
     }
 }
 
@@ -290,63 +295,14 @@ contract DeployPoolReader is Script {
 
 /**
  * @title DeployVoteSaleDirect
- * @notice Deploy Vote-Sale without Factory (bypasses 24KB limit)
- * @dev Deploys LPLocker + KickoffVoteSalePool separately
- *      Use this for testnet when Factory exceeds EIP-170 limit
+ * @notice DEPRECATED: Use DeployVoteSaleOnly instead
+ * @dev This script is deprecated because LPLocker now requires factory linkage for security.
+ *      Without a factory, lockLP() will revert with NotVoteSalePool.
+ *      Use DeployVoteSaleOnly which deploys KickoffFactory (includes LPLocker).
  */
 contract DeployVoteSaleDirect is Script {
-    address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
-    address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
-    address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
-    address constant WETH = 0x4200000000000000000000000000000000000006;
-
-    function run() external {
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address deployer = vm.addr(deployerPrivateKey);
-
-        console.log("");
-        console.log("========================================");
-        console.log("  VOTE-SALE DIRECT DEPLOYMENT");
-        console.log("  (Bypasses Factory 24KB limit)");
-        console.log("========================================");
-        console.log("");
-        console.log("Deployer:", deployer);
-        console.log("Balance:", deployer.balance / 1e15, "finney");
-
-        vm.startBroadcast(deployerPrivateKey);
-
-        // 1. Deploy LPLocker
-        LPLocker lpLocker = new LPLocker();
-        console.log("LPLocker:", address(lpLocker));
-
-        // 2. Deploy KickoffVoteSalePool directly
-        // Using test values - replace with actual project params
-        KickoffVoteSalePool pool = new KickoffVoteSalePool(
-            address(0x1), // projectToken - placeholder, deploy real one first
-            deployer,     // admin
-            deployer,     // projectOwner
-            1e18,         // totalAllocation - placeholder
-            1e18,         // minVotingPower - placeholder
-            address(lpLocker),
-            VOTING_ESCROW,
-            VOTER,
-            ROUTER,
-            WETH
-        );
-        console.log("KickoffVoteSalePool:", address(pool));
-
-        vm.stopBroadcast();
-
-        console.log("");
-        console.log("========================================");
-        console.log("  DEPLOYMENT COMPLETE");
-        console.log("========================================");
-        console.log("");
-        console.log("LP_LOCKER=", address(lpLocker));
-        console.log("VOTE_SALE_POOL=", address(pool));
-        console.log("");
-        console.log("NOTE: This pool was deployed with placeholder values.");
-        console.log("      For production, deploy new pools with real params.");
+    function run() external pure {
+        revert("DEPRECATED: Use DeployVoteSaleOnly instead. LPLocker requires factory linkage.");
     }
 }
 

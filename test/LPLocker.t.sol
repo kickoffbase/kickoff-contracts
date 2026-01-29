@@ -5,10 +5,11 @@ import "forge-std/Test.sol";
 import {LPLocker} from "../src/LPLocker.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockPool} from "./mocks/MockPool.sol";
+import {MockKickoffFactory} from "./mocks/MockKickoffFactory.sol";
 
 contract LPLockerTest is Test {
     LPLocker public lpLocker;
-    MockERC20 public lpToken;
+    MockKickoffFactory public mockFactory;
     MockPool public aerodromePool;
     MockERC20 public token0;
     MockERC20 public token1;
@@ -21,16 +22,33 @@ contract LPLockerTest is Test {
     uint256 public constant LP_AMOUNT = 1000 ether;
     uint256 public constant FEES_AMOUNT = 100 ether;
 
+    // Aerodrome PoolFactory address on Base
+    address constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+
     function setUp() public {
         // Deploy contracts
         lpLocker = new LPLocker();
-        lpToken = new MockERC20("LP Token", "LP", 18);
+        mockFactory = new MockKickoffFactory();
         token0 = new MockERC20("Token0", "T0", 18);
         token1 = new MockERC20("Token1", "T1", 18);
-        aerodromePool = new MockPool(address(token0), address(token1), address(lpToken));
+        
+        // On Aerodrome, LP token IS the pool contract
+        // Deploy MockPool which acts as both LP token and pool
+        aerodromePool = new MockPool(address(token0), address(token1), address(0));
 
-        // Mint LP tokens to vote pool
-        lpToken.mint(votePool, LP_AMOUNT);
+        // Setup factory relationship
+        lpLocker.setFactory(address(mockFactory));
+        mockFactory.setPool(votePool, true);
+        
+        // Mock Aerodrome PoolFactory to return true for our mock pool
+        vm.mockCall(
+            AERODROME_POOL_FACTORY,
+            abi.encodeWithSignature("isPool(address)", address(aerodromePool)),
+            abi.encode(true)
+        );
+
+        // Mint LP tokens to vote pool (pool IS the LP token on Aerodrome)
+        aerodromePool.mintLP(votePool, LP_AMOUNT);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -39,13 +57,14 @@ contract LPLockerTest is Test {
 
     function test_LockLP() public {
         vm.startPrank(votePool);
-        lpToken.approve(address(lpLocker), LP_AMOUNT);
-        lpLocker.lockLP(address(lpToken), address(aerodromePool), admin, projectOwner, LP_AMOUNT);
+        // On Aerodrome, LP token IS the pool contract
+        aerodromePool.approve(address(lpLocker), LP_AMOUNT);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), admin, projectOwner, LP_AMOUNT);
         vm.stopPrank();
 
         // Verify lock
         LPLocker.LockedLP memory locked = lpLocker.getLockedLP(votePool);
-        assertEq(locked.lpToken, address(lpToken));
+        assertEq(locked.lpToken, address(aerodromePool));
         assertEq(locked.aerodromePool, address(aerodromePool));
         assertEq(locked.admin, admin);
         assertEq(locked.projectOwner, projectOwner);
@@ -53,8 +72,8 @@ contract LPLockerTest is Test {
         assertTrue(locked.exists);
 
         // Verify LP transferred
-        assertEq(lpToken.balanceOf(address(lpLocker)), LP_AMOUNT);
-        assertEq(lpToken.balanceOf(votePool), 0);
+        assertEq(aerodromePool.balanceOf(address(lpLocker)), LP_AMOUNT);
+        assertEq(aerodromePool.balanceOf(votePool), 0);
 
         // Verify tracking
         assertEq(lpLocker.getVotePoolCount(), 1);
@@ -63,19 +82,19 @@ contract LPLockerTest is Test {
 
     function test_LockLP_RevertZeroAddress() public {
         vm.startPrank(votePool);
-        lpToken.approve(address(lpLocker), LP_AMOUNT);
+        aerodromePool.approve(address(lpLocker), LP_AMOUNT);
 
         vm.expectRevert(LPLocker.ZeroAddress.selector);
         lpLocker.lockLP(address(0), address(aerodromePool), admin, projectOwner, LP_AMOUNT);
 
         vm.expectRevert(LPLocker.ZeroAddress.selector);
-        lpLocker.lockLP(address(lpToken), address(0), admin, projectOwner, LP_AMOUNT);
+        lpLocker.lockLP(address(aerodromePool), address(0), admin, projectOwner, LP_AMOUNT);
 
         vm.expectRevert(LPLocker.ZeroAddress.selector);
-        lpLocker.lockLP(address(lpToken), address(aerodromePool), address(0), projectOwner, LP_AMOUNT);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), address(0), projectOwner, LP_AMOUNT);
 
         vm.expectRevert(LPLocker.ZeroAddress.selector);
-        lpLocker.lockLP(address(lpToken), address(aerodromePool), admin, address(0), LP_AMOUNT);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), admin, address(0), LP_AMOUNT);
 
         vm.stopPrank();
     }
@@ -84,20 +103,60 @@ contract LPLockerTest is Test {
         vm.startPrank(votePool);
 
         vm.expectRevert(LPLocker.ZeroAmount.selector);
-        lpLocker.lockLP(address(lpToken), address(aerodromePool), admin, projectOwner, 0);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), admin, projectOwner, 0);
 
         vm.stopPrank();
     }
 
     function test_LockLP_RevertAlreadyLocked() public {
         vm.startPrank(votePool);
-        lpToken.approve(address(lpLocker), LP_AMOUNT);
-        lpLocker.lockLP(address(lpToken), address(aerodromePool), admin, projectOwner, LP_AMOUNT / 2);
+        aerodromePool.approve(address(lpLocker), LP_AMOUNT);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), admin, projectOwner, LP_AMOUNT / 2);
 
         vm.expectRevert(LPLocker.AlreadyLocked.selector);
-        lpLocker.lockLP(address(lpToken), address(aerodromePool), admin, projectOwner, LP_AMOUNT / 2);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), admin, projectOwner, LP_AMOUNT / 2);
 
         vm.stopPrank();
+    }
+
+    function test_LockLP_RevertNotVoteSalePool() public {
+        // Try to lock from an address not registered as a pool
+        address attacker = address(0x999);
+        aerodromePool.mintLP(attacker, LP_AMOUNT);
+
+        vm.startPrank(attacker);
+        aerodromePool.approve(address(lpLocker), LP_AMOUNT);
+
+        vm.expectRevert(LPLocker.NotVoteSalePool.selector);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), attacker, attacker, LP_AMOUNT);
+
+        vm.stopPrank();
+    }
+
+    function test_LockLP_RevertFactoryNotSet() public {
+        // Deploy a fresh LPLocker without setting factory
+        LPLocker freshLocker = new LPLocker();
+        
+        vm.startPrank(votePool);
+        aerodromePool.approve(address(freshLocker), LP_AMOUNT);
+
+        vm.expectRevert(LPLocker.FactoryNotSet.selector);
+        freshLocker.lockLP(address(aerodromePool), address(aerodromePool), admin, projectOwner, LP_AMOUNT);
+
+        vm.stopPrank();
+    }
+
+    function test_SetFactory_RevertAlreadySet() public {
+        // Factory is already set in setUp
+        vm.expectRevert(LPLocker.FactoryAlreadySet.selector);
+        lpLocker.setFactory(address(0x123));
+    }
+
+    function test_SetFactory_RevertZeroAddress() public {
+        LPLocker freshLocker = new LPLocker();
+        
+        vm.expectRevert(LPLocker.ZeroAddress.selector);
+        freshLocker.setFactory(address(0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -234,8 +293,8 @@ contract LPLockerTest is Test {
 
     function _lockLP() internal {
         vm.startPrank(votePool);
-        lpToken.approve(address(lpLocker), LP_AMOUNT);
-        lpLocker.lockLP(address(lpToken), address(aerodromePool), admin, projectOwner, LP_AMOUNT);
+        aerodromePool.approve(address(lpLocker), LP_AMOUNT);
+        lpLocker.lockLP(address(aerodromePool), address(aerodromePool), admin, projectOwner, LP_AMOUNT);
         vm.stopPrank();
     }
 }

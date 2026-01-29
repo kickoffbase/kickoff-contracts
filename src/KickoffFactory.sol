@@ -90,8 +90,10 @@ contract KickoffFactory {
         router = _router;
         weth = _weth;
 
-        // Deploy LPLocker
+        // Deploy LPLocker and link it to this factory
+        // SECURITY: setFactory() ensures only pools created by this factory can lock LP
         lpLocker = new LPLocker();
+        lpLocker.setFactory(address(this));
 
         emit OwnershipTransferred(address(0), msg.sender);
     }

@@ -5,10 +5,10 @@ import {MockERC20} from "./MockERC20.sol";
 
 /// @title MockPool
 /// @notice Mock Aerodrome Pool for testing
+/// @dev On Aerodrome, the LP token IS the pool contract itself (same address)
 contract MockPool {
     address public token0;
     address public token1;
-    address public lpToken;
 
     uint256 private _claimable0;
     uint256 private _claimable1;
@@ -16,10 +16,14 @@ contract MockPool {
     bool public stable = false;
     uint256 public fee = 30; // 0.3%
 
-    constructor(address _token0, address _token1, address _lpToken) {
+    // ERC20 storage for LP tokens (pool is its own LP token on Aerodrome)
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 private _totalSupply;
+
+    constructor(address _token0, address _token1, address /* _lpToken - deprecated */) {
         token0 = _token0;
         token1 = _token1;
-        lpToken = _lpToken;
     }
 
     function claimFees() external returns (uint256 claimed0, uint256 claimed1) {
@@ -54,28 +58,36 @@ contract MockPool {
         return (1000 ether, 1000 ether, block.timestamp);
     }
 
-    function totalSupply() external pure returns (uint256) {
-        return 1000 ether;
+    function totalSupply() external view returns (uint256) {
+        return _totalSupply;
     }
 
     function balanceOf(address account) external view returns (uint256) {
-        return MockERC20(lpToken).balanceOf(account);
+        return _balances[account];
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {
-        return MockERC20(lpToken).transfer(to, amount);
+        _balances[msg.sender] -= amount;
+        _balances[to] += amount;
+        return true;
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        return MockERC20(lpToken).transferFrom(from, to, amount);
+        if (_allowances[from][msg.sender] != type(uint256).max) {
+            _allowances[from][msg.sender] -= amount;
+        }
+        _balances[from] -= amount;
+        _balances[to] += amount;
+        return true;
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
-        return MockERC20(lpToken).approve(spender, amount);
+        _allowances[msg.sender][spender] = amount;
+        return true;
     }
 
     function allowance(address owner, address spender) external view returns (uint256) {
-        return MockERC20(lpToken).allowance(owner, spender);
+        return _allowances[owner][spender];
     }
 
     function factory() external view returns (address) {
@@ -92,6 +104,12 @@ contract MockPool {
 
     function decimals() external pure returns (uint8) {
         return 18;
+    }
+
+    /// @notice Mint LP tokens (for testing)
+    function mintLP(address to, uint256 amount) external {
+        _balances[to] += amount;
+        _totalSupply += amount;
     }
 
     function mint(address) external pure returns (uint256) {
