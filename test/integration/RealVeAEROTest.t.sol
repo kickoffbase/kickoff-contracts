@@ -146,7 +146,7 @@ contract RealVeAEROTest is Test {
         console.log("PHASE 3: CAST VOTES");
         console.log("-------------------");
         vm.prank(admin);
-        pool.castVotes(WETH_AERO_GAUGE);
+        pool.triggerStateTransition();
         console.log("Votes cast on gauge:", WETH_AERO_GAUGE);
         console.log("");
     }
@@ -174,15 +174,12 @@ contract RealVeAEROTest is Test {
         console.log("PHASE 6: FINALIZE (REAL SWAPS!)");
         console.log("-------------------------------");
         
-        vm.mockCall(VOTER, abi.encodeWithSignature("internal_bribes(address)"), abi.encode(address(0x1)));
-        vm.mockCall(VOTER, abi.encodeWithSignature("external_bribes(address)"), abi.encode(address(0x2)));
-        vm.mockCall(VOTER, abi.encodeWithSignature("claimBribes(address[],address[][],uint256)"), abi.encode());
-        vm.mockCall(VOTER, abi.encodeWithSignature("claimFees(address[],address[][],uint256)"), abi.encode());
-
-        // Finalize with auto token discovery
-        vm.prank(admin);
-        pool.finalizeEpoch();
-        vm.clearMockedCalls();
+        // Autopilot finalization flow
+        vm.startPrank(admin);
+        pool.startClaimRewardsFromAutopilot(50);
+        pool.convertUSDCtoWETH();
+        pool.completeAutopilotFinalization();
+        vm.stopPrank();
 
         console.log("WETH Collected:", pool.wethCollected() / 1e18, "WETH");
         console.log("LP Created:", pool.lpCreated() / 1e18, "LP");
@@ -198,7 +195,7 @@ contract RealVeAEROTest is Test {
         uint256 totalClaimed = 0;
         
         for (uint256 i = 0; i < tokenIds.length; i++) {
-            (address owner,,) = reader.getLockedNFTInfo(address(pool), tokenIds[i]);
+            (address owner,,,) = reader.getLockedNFTInfo(address(pool), tokenIds[i]);
             uint256 claimable = reader.getClaimableTokens(address(pool), owner);
             
             vm.prank(owner);

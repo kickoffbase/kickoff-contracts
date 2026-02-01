@@ -85,5 +85,10 @@ interface IVotingEscrow {
     /// @param tokenId The NFT token ID
     /// @return True if the NFT is deactivated
     function deactivated(uint256 tokenId) external view returns (bool);
+
+    /// @notice Check if an NFT has voted in the current epoch
+    /// @param tokenId The NFT token ID
+    /// @return True if the NFT has the voted flag set
+    function voted(uint256 tokenId) external view returns (bool);
 }
 

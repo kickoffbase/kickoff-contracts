@@ -10,6 +10,7 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockVotingEscrow} from "./mocks/MockVotingEscrow.sol";
 import {MockVoter} from "./mocks/MockVoter.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
+import {MockAutopilot} from "./mocks/MockAutopilot.sol";
 
 contract KickoffVoteSalePoolTest is Test {
     KickoffFactory public factory;
@@ -19,9 +20,11 @@ contract KickoffVoteSalePoolTest is Test {
 
     MockERC20 public projectToken;
     MockERC20 public weth;
+    MockERC20 public usdc;
     MockVotingEscrow public votingEscrow;
     MockVoter public voter;
     MockRouter public router;
+    MockAutopilot public autopilot;
 
     address public admin = address(0x1);
     address public projectOwner = address(0x2);
@@ -32,10 +35,16 @@ contract KickoffVoteSalePoolTest is Test {
     address public mockPool = address(0x101);
     address public mockInternalBribe = address(0x102);
     address public mockExternalBribe = address(0x103);
+    
+    // Hardcoded addresses from KickoffVoteSalePool/LPLocker
+    address constant AUTOPILOT_ADDRESS = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
+    address constant USDC_ADDRESS = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
     uint256 public constant TOTAL_ALLOCATION = 1_000_000 ether;
     uint256 public constant USER1_VOTING_POWER = 100_000 ether;
     uint256 public constant USER2_VOTING_POWER = 50_000 ether;
+    uint256 public constant MIN_VOTING_POWER = 400 ether; // Autopilot minimum
 
     function setUp() public {
         // Set realistic timestamp (current epoch > 0)
@@ -47,6 +56,21 @@ contract KickoffVoteSalePoolTest is Test {
         voter = new MockVoter(address(votingEscrow));
         router = new MockRouter(address(weth));
         projectToken = new MockERC20("Project Token", "PROJECT", 18);
+        
+        // Deploy USDC mock at hardcoded address
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+        vm.etch(USDC_ADDRESS, address(usdc).code);
+        
+        // Deploy Autopilot mock at hardcoded address
+        autopilot = new MockAutopilot(USDC_ADDRESS);
+        vm.etch(AUTOPILOT_ADDRESS, address(autopilot).code);
+        
+        // Mock Aerodrome PoolFactory - always return true for isPool
+        vm.mockCall(
+            AERODROME_POOL_FACTORY,
+            abi.encodeWithSignature("isPool(address)"),
+            abi.encode(true)
+        );
 
         // Setup voter mock
         voter.setGauge(mockPool, mockGauge);
@@ -72,10 +96,11 @@ contract KickoffVoteSalePoolTest is Test {
         
         // Create pool - called by factory owner (this test contract)
         // Factory transfers tokens from poolAdmin (admin)
-        address poolAddr = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 1 ether, admin);
+        // minVotingPower must be >= MIN_AUTOPILOT_VOTING_POWER (400e18)
+        address poolAddr = factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, MIN_VOTING_POWER, admin);
         pool = KickoffVoteSalePool(poolAddr);
 
-        // Mint veAERO NFTs to users
+        // Mint veAERO NFTs to users (must be >= MIN_VOTING_POWER)
         votingEscrow.mint(user1, USER1_VOTING_POWER, block.timestamp + 365 days);
         votingEscrow.mint(user2, USER2_VOTING_POWER, block.timestamp + 365 days);
     }
@@ -127,7 +152,7 @@ contract KickoffVoteSalePoolTest is Test {
         assertEq(pool.totalVotingPower(), USER1_VOTING_POWER);
         assertEq(votingEscrow.ownerOf(1), address(pool));
 
-        (address owner, uint256 votingPower, bool unlocked) = reader.getLockedNFTInfo(address(pool), 1);
+        (address owner, uint256 votingPower, bool unlocked,) = reader.getLockedNFTInfo(address(pool), 1);
         assertEq(owner, user1);
         assertEq(votingPower, USER1_VOTING_POWER);
         assertFalse(unlocked);
@@ -247,51 +272,10 @@ contract KickoffVoteSalePoolTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                           CAST VOTES TESTS
+                        STATE TRANSITION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_CastVotes() public {
-        // Setup
-        vm.prank(admin);
-        pool.activate();
-
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
-
-        // Cast votes
-        vm.prank(admin);
-        pool.castVotes(mockGauge);
-
-        assertEq(pool.gauge(), mockGauge);
-        assertEq(pool.aerodromePool(), mockPool);
-        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Voting));
-    }
-
-    function test_CastVotes_RevertNotAdmin() public {
-        vm.prank(admin);
-        pool.activate();
-
-        vm.prank(user1);
-        vm.expectRevert(KickoffVoteSalePool.NotAdmin.selector);
-        pool.castVotes(mockGauge);
-    }
-
-    function test_CastVotes_RevertZeroAddress() public {
-        vm.prank(admin);
-        pool.activate();
-
-        vm.prank(admin);
-        vm.expectRevert(KickoffVoteSalePool.ZeroAddress.selector);
-        pool.castVotes(address(0));
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                        FINALIZE EPOCH TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_FinalizeEpoch() public {
+    function test_StateTransitionToVoting() public {
         // Setup and lock
         vm.prank(admin);
         pool.activate();
@@ -301,20 +285,49 @@ contract KickoffVoteSalePoolTest is Test {
         pool.lockVeAERO(1);
         vm.stopPrank();
 
-        // Cast votes
-        vm.prank(admin);
-        pool.castVotes(mockGauge);
+        // State should be Active
+        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Active));
 
-        // Mint some WETH to simulate bribe rewards
-        weth.mint(address(pool), 10 ether);
+        // Advance past lockingDeadline and trigger state transition
+        uint256 lockingDeadline = pool.lockingDeadline();
+        vm.warp(lockingDeadline + 1);
+        
+        vm.prank(admin);
+        pool.triggerStateTransition();
+        
+        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Voting));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        FINALIZE EPOCH TESTS (AUTOPILOT FLOW)
+    //////////////////////////////////////////////////////////////*/
+
+    function test_FinalizeWithAutopilot() public {
+        // Setup and lock
+        vm.prank(admin);
+        pool.activate();
+
+        vm.startPrank(user1);
+        votingEscrow.approve(address(pool), 1);
+        pool.lockVeAERO(1);
+        vm.stopPrank();
 
         // Advance to next epoch (rewards are claimable only after epoch ends)
+        // checkStateTransition modifier will auto-transition from Active to Voting
         uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
-        vm.warp(nextEpochStart + 1 hours);
+        vm.warp(nextEpochStart + 2 hours); // Past special window
 
-        // Finalize (auto token discovery)
-        vm.prank(admin);
-        pool.finalizeEpoch();
+        // Autopilot finalization flow (auto-transitions Active -> Voting)
+        vm.startPrank(admin);
+        pool.startClaimRewardsFromAutopilot(50);
+        
+        // Mint WETH after start (simulates USDC->WETH swap)
+        // wethBeforeFinalization was captured, so this will count as claimed rewards
+        weth.mint(address(pool), 10 ether);
+        
+        pool.convertUSDCtoWETH();
+        pool.completeAutopilotFinalization();
+        vm.stopPrank();
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
         assertTrue(pool.lpCreated() > 0);
@@ -332,7 +345,7 @@ contract KickoffVoteSalePoolTest is Test {
 
         assertEq(votingEscrow.ownerOf(1), user1);
 
-        (, , bool unlocked) = reader.getLockedNFTInfo(address(pool), 1);
+        (, , bool unlocked,) = reader.getLockedNFTInfo(address(pool), 1);
         assertTrue(unlocked);
     }
 
@@ -480,20 +493,21 @@ contract KickoffVoteSalePoolTest is Test {
         pool.lockVeAERO(2);
         vm.stopPrank();
 
-        // Cast votes
-        vm.prank(admin);
-        pool.castVotes(mockGauge);
-
-        // Simulate bribes
-        weth.mint(address(pool), 10 ether);
-
-        // Advance to next epoch (rewards are claimable only after epoch ends)
+        // Advance to next epoch + past special window
+        // checkStateTransition modifier will auto-transition Active -> Voting
         uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
-        vm.warp(nextEpochStart + 1 hours);
+        vm.warp(nextEpochStart + 2 hours);
 
-        // Finalize (auto token discovery)
-        vm.prank(admin);
-        pool.finalizeEpoch();
+        // Autopilot finalization flow (auto-transitions state)
+        vm.startPrank(admin);
+        pool.startClaimRewardsFromAutopilot(50);
+        
+        // Mint WETH after start (simulates USDC->WETH swap rewards)
+        weth.mint(address(pool), 10 ether);
+        
+        pool.convertUSDCtoWETH();
+        pool.completeAutopilotFinalization();
+        vm.stopPrank();
     }
 }
 

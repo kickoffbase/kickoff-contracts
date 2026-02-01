@@ -159,6 +159,15 @@ contract LPLockerTest is Test {
         freshLocker.setFactory(address(0));
     }
 
+    function test_SetFactory_RevertNotDeployer() public {
+        LPLocker freshLocker = new LPLocker();
+        
+        // Try to set factory from a different address (not deployer)
+        vm.prank(address(0x999));
+        vm.expectRevert(LPLocker.NotDeployer.selector);
+        freshLocker.setFactory(address(mockFactory));
+    }
+
     /*//////////////////////////////////////////////////////////////
                        CLAIM TRADING FEES TESTS
     //////////////////////////////////////////////////////////////*/

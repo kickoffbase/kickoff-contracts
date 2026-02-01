@@ -16,6 +16,7 @@ contract KickoffFactory {
     error ZeroAddress();
     error ZeroAmount();
     error ZeroVotingPower();
+    error VotingPowerBelowAutopilotMin();
     error NotOwner();
     error PoolAlreadyExists();
     error TransferFailed();
@@ -35,6 +36,14 @@ contract KickoffFactory {
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event PendingOwnerSet(address indexed pendingOwner);
+
+    /*//////////////////////////////////////////////////////////////
+                                CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Minimum voting power required by Autopilot (400 veAERO)
+    /// @dev Pools require minVotingPower >= this value for Autopilot compatibility
+    uint256 public constant MIN_AUTOPILOT_VOTING_POWER = 400e18;
 
     /*//////////////////////////////////////////////////////////////
                                  STATE
@@ -91,7 +100,6 @@ contract KickoffFactory {
         weth = _weth;
 
         // Deploy LPLocker and link it to this factory
-        // SECURITY: setFactory() ensures only pools created by this factory can lock LP
         lpLocker = new LPLocker();
         lpLocker.setFactory(address(this));
 
@@ -128,6 +136,10 @@ contract KickoffFactory {
         // #1: Enforce non-zero minVotingPower to prevent DoS via zero-VP NFTs
         if (minVotingPower == 0) {
             revert ZeroVotingPower();
+        }
+        // Ensure minVotingPower meets Autopilot's minimum requirement (400 veAERO)
+        if (minVotingPower < MIN_AUTOPILOT_VOTING_POWER) {
+            revert VotingPowerBelowAutopilotMin();
         }
         if (poolByToken[projectToken] != address(0)) {
             revert PoolAlreadyExists();

@@ -22,7 +22,7 @@ contract KickoffFactoryTest is Test {
     address public weth = address(0x13);
 
     uint256 public constant TOTAL_ALLOCATION = 1_000_000 ether;
-    uint256 public constant MIN_VOTING_POWER = 1 ether; // #1: Must be > 0
+    uint256 public constant MIN_VOTING_POWER = 400 ether; // Must be >= MIN_AUTOPILOT_VOTING_POWER (400 veAERO)
 
     function setUp() public {
         // Deploy project token

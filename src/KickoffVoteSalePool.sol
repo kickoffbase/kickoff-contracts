@@ -6,11 +6,10 @@ import {LPLocker} from "./LPLocker.sol";
 import {IVotingEscrow} from "./interfaces/IVotingEscrow.sol";
 import {IVoter} from "./interfaces/IVoter.sol";
 import {IRouter} from "./interfaces/IRouter.sol";
-import {IPool} from "./interfaces/IPool.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IWETH} from "./interfaces/IWETH.sol";
 import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
-import {IVotingReward} from "./interfaces/IVotingReward.sol";
+import {IAutopilot} from "./interfaces/IAutopilot.sol";
 
 /// @title KickoffVoteSalePool
 /// @notice Vote-Sale pool for veAERO holders to participate in project launches
@@ -55,8 +54,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error BatchSizeTooLarge();
     error ReentrancyGuardReentrantCall();
     error SlippageExceeded();
-    error InvalidGauge();
-    error GaugeNotActive();
     error EpochNotEnded();
     error VotingPowerTooLow();
     error NFTDeactivated();
@@ -64,6 +61,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error NoParticipants();
     error InvalidDeadline();
     error NotAllClaimed();
+    error AutopilotDepositFailed();
+    error AutopilotWithdrawFailed();
+    error NotInAutopilot();
+    error StillInAutopilot();
+    error InAutopilotSpecialWindow();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -71,15 +73,16 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     event VeAEROLocked(address indexed user, uint256 indexed tokenId, uint256 votingPower);
     event VeAEROUnlocked(address indexed user, uint256 indexed tokenId);
-    event VotesCast(address indexed gauge, uint256 totalVotingPower);
     event EpochFinalized(uint256 wethCollected, uint256 lpCreated);
     event ProjectTokensClaimed(address indexed user, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed tokenId);
     event TokensRescued(address indexed token, address indexed to, uint256 amount);
     event StateChanged(PoolState previousState, PoolState newState);
     event BatchProgress(string operation, uint256 processed, uint256 total);
-    event NFTSkipped(uint256 indexed tokenId, string reason);
     event PoolCancelledEvent(uint256 projectTokensRecovered);
+    event DepositedToAutopilot(uint256 indexed tokenId);
+    event WithdrawnFromAutopilot(uint256 indexed tokenId);
+    event AutopilotRewardsClaimed(uint256 indexed tokenId, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
                                  ENUMS
@@ -161,12 +164,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Current pool state
     PoolState public state;
 
-    /// @notice Gauge address (set during castVotes)
-    address public gauge;
-
-    /// @notice Aerodrome pool for the LP
-    address public aerodromePool;
-
     /// @notice LP token address
     address public lpToken;
 
@@ -223,17 +220,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Whether a batch operation is in progress
     bool public batchInProgress;
 
-    /// @notice Bribe tokens for batch claim (stored between batches)
-    /// @dev Cached reward tokens for batch operations (auto-discovered)
-    address[] private _cachedRewardTokens;
-    
-    /// @notice Token IDs that were skipped during voting (deactivated/failed)
-    /// @dev These NFTs are excluded from rewards and can be emergency returned
-    uint256[] public skippedTokenIds;
-    
-    /// @notice Mapping to track if a tokenId was skipped
-    mapping(uint256 => bool) public isSkipped;
-
     /*//////////////////////////////////////////////////////////////
                           SLIPPAGE PROTECTION
     //////////////////////////////////////////////////////////////*/
@@ -255,6 +241,32 @@ contract KickoffVoteSalePool is IERC721Receiver {
     uint256 public deadlineBuffer = 20 minutes;
 
     /*//////////////////////////////////////////////////////////////
+                          AUTOPILOT INTEGRATION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Autopilot PermanentLocksPool contract (Base mainnet)
+    IAutopilot public constant autopilot = IAutopilot(0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4);
+
+    /// @notice USDC token (rewards from Autopilot)
+    IERC20 public constant usdc = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
+
+    /// @notice Minimum voting power required for Autopilot deposit (400 veAERO)
+    uint256 public constant MIN_AUTOPILOT_VOTING_POWER = 400e18;
+
+    /// @notice Buffer time before epoch end when locking closes (before Autopilot special window)
+    uint256 public constant SPECIAL_WINDOW_BUFFER = 90 minutes;
+
+    /// @notice Timestamp when locking closes (auto-transitions to Voting state)
+    /// @dev Set during activate() as epochEnd - SPECIAL_WINDOW_BUFFER
+    uint256 public lockingDeadline;
+
+    /// @notice Track which NFTs are deposited in Autopilot
+    mapping(uint256 => bool) public depositedToAutopilot;
+
+    /// @notice USDC balance before finalization started (for accurate reward tracking)
+    uint256 private usdcBeforeFinalization;
+
+    /*//////////////////////////////////////////////////////////////
                               MODIFIERS
     //////////////////////////////////////////////////////////////*/
 
@@ -270,6 +282,15 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     modifier inState(PoolState _state) {
         if (state != _state) revert InvalidState();
+        _;
+    }
+
+    /// @notice Modifier that auto-transitions Active -> Voting when lockingDeadline is reached
+    /// @dev Ensures state automatically changes without admin action
+    modifier checkStateTransition() {
+        if (state == PoolState.Active && block.timestamp >= lockingDeadline) {
+            _setState(PoolState.Voting);
+        }
         _;
     }
 
@@ -323,16 +344,40 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Activate the pool for the current epoch
     /// @dev Stores both Kickoff epoch and Aerodrome epoch start to ensure alignment
+    /// @dev Sets lockingDeadline to prevent locking during Autopilot special window
     function activate() external onlyAdmin inState(PoolState.Inactive) {
         activeEpoch = EpochLib.currentEpoch();
         // #4: Store Aerodrome epoch start to ensure voting/finalization alignment
         aerodromeEpochStart = EpochLib.currentEpochStart();
+        
+        // Set locking deadline: 90 minutes before epoch end (before Autopilot special window)
+        uint256 epochEnd = aerodromeEpochStart + 1 weeks;
+        lockingDeadline = epochEnd - SPECIAL_WINDOW_BUFFER;
+        
         _setState(PoolState.Active);
+    }
+
+    /// @notice Manually trigger state transition from Active to Voting
+    /// @dev Can be called by anyone after lockingDeadline is reached
+    /// @dev Useful to transition state without a failed lockVeAERO transaction
+    function triggerStateTransition() external {
+        if (state != PoolState.Active) revert InvalidState();
+        if (block.timestamp < lockingDeadline) revert InvalidState();
+        
+        _setState(PoolState.Voting);
     }
 
     /// @notice Lock a veAERO NFT to participate in the vote-sale
     /// @param tokenId The veAERO NFT token ID
-    function lockVeAERO(uint256 tokenId) external nonReentrant inState(PoolState.Active) {
+    /// @dev NFT is automatically deposited to Autopilot for vAPR optimization
+    /// @dev WARNING: NFT will be converted to permanent lock (4-year max) by Autopilot
+    function lockVeAERO(uint256 tokenId) external nonReentrant checkStateTransition {
+        // Check state after potential auto-transition
+        if (state != PoolState.Active) revert InvalidState();
+        
+        // Check locking deadline (prevents locking during Autopilot special window)
+        if (block.timestamp >= lockingDeadline) revert LockingClosed();
+        
         // Check ownership
         if (votingEscrow.ownerOf(tokenId) != msg.sender) {
             revert NotNFTOwner();
@@ -355,7 +400,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Get voting power
         uint256 votingPowerAmount = votingEscrow.balanceOfNFT(tokenId);
         
-        // Check minimum voting power requirement
+        // Check minimum voting power (factory ensures minVotingPower >= MIN_AUTOPILOT_VOTING_POWER)
         if (votingPowerAmount < minVotingPower) {
             revert VotingPowerTooLow();
         }
@@ -377,193 +422,211 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Update total voting power
         totalVotingPower += votingPowerAmount;
 
+        // Deposit NFT to Autopilot for automated vAPR voting
+        votingEscrow.approve(address(autopilot), tokenId);
+        try autopilot.deposit(tokenId) {
+            depositedToAutopilot[tokenId] = true;
+            emit DepositedToAutopilot(tokenId);
+        } catch {
+            // If Autopilot deposit fails, revert the whole transaction
+            revert AutopilotDepositFailed();
+        }
+
         emit VeAEROLocked(msg.sender, tokenId, votingPowerAmount);
     }
 
     /*//////////////////////////////////////////////////////////////
-                        PHASE 2: CAST VOTES (BATCH)
+                    AUTOPILOT CLAIM & WITHDRAW
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Start or continue casting votes in batches
-    /// @param _gauge The Aerodrome gauge to vote for (only used on first call)
-    /// @param batchSize Number of NFTs to process in this batch (max MAX_BATCH_SIZE)
-    /// @dev Call multiple times until getVotingProgress().inProgress returns false
-    /// @dev State changes to Voting on first batch, blocking further NFT locks
-    /// @dev #2: Skips deactivated/failed NFTs and updates accounting
-    /// @dev #11: Revalidates gauge on each batch to handle killed gauges
-    /// @dev #12: If epoch changes or gauge is killed mid-batch, voting completes gracefully
-    ///      with current progress. All locked NFT holders remain eligible for project token
-    ///      claims regardless of whether their NFT successfully voted, as they committed
-    ///      their veAERO in good faith for the epoch duration.
-    function castVotesBatch(address _gauge, uint256 batchSize) external onlyAdmin {
-        // First batch requires Active state, subsequent batches require Voting state with batch in progress
-        if (!batchInProgress) {
-            if (state != PoolState.Active) revert InvalidState();
-        } else {
-            if (state != PoolState.Voting) revert InvalidState();
+    /// @notice Check if we're outside Autopilot's special window
+    /// @dev Special window is ~90 min before epoch end to ~30 min after epoch start
+    function _isOutsideAutopilotSpecialWindow() internal view returns (bool) {
+        uint256 epochEnd = aerodromeEpochStart + 1 weeks;
+        uint256 windowStart = epochEnd - 90 minutes; // 90 min before epoch end
+        uint256 windowEnd = epochEnd + 30 minutes;   // 30 min after epoch start (new epoch)
+        
+        return block.timestamp < windowStart || block.timestamp > windowEnd;
+    }
+
+    /// @notice Start claiming USDC rewards from Autopilot in batches
+    /// @param batchSize Number of NFTs to process per batch
+    /// @dev Autopilot handles voting and converts rewards to USDC automatically
+    function startClaimRewardsFromAutopilot(uint256 batchSize) 
+        external 
+        onlyAdmin 
+        checkStateTransition
+    {
+        // Allow calling from Voting state (after lockingDeadline auto-transition)
+        if (state != PoolState.Voting) revert InvalidState();
+        if (batchInProgress) revert BatchInProgress();
+        
+        // Check for zero effective participants
+        if (totalVotingPower == 0) {
+            _setState(PoolState.Cancelled);
+            uint256 balance = IERC20(projectToken).balanceOf(address(this));
+            if (balance > 0) {
+                _safeTransferProjectToken(projectOwner, balance);
+            }
+            emit PoolCancelledEvent(balance);
+            return;
         }
         
+        // Ensure Aerodrome epoch has ended
+        uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
+        if (block.timestamp <= aerodromeEpochEnd) revert EpochNotEnded();
+        
+        // Ensure we're outside Autopilot's special window
+        if (!_isOutsideAutopilotSpecialWindow()) revert InAutopilotSpecialWindow();
+        
+        _setState(PoolState.Finalizing);
+        finalizeStep = FinalizeStep.ClaimingRewards;
+        
+        // Store USDC and WETH balance before claiming
+        usdcBeforeFinalization = usdc.balanceOf(address(this));
+        wethBeforeFinalization = weth.balanceOf(address(this));
+        
+        batchIndex = 0;
+        batchInProgress = true;
+        
+        _claimAutopilotRewardsBatchInternal(batchSize);
+    }
+
+    /// @notice Continue claiming USDC rewards from Autopilot
+    /// @param batchSize Number of NFTs to process
+    function continueClaimRewardsFromAutopilot(uint256 batchSize) external onlyAdmin inState(PoolState.Finalizing) {
+        if (!batchInProgress) revert NoBatchInProgress();
+        if (finalizeStep != FinalizeStep.ClaimingRewards) revert InvalidState();
+        
+        _claimAutopilotRewardsBatchInternal(batchSize);
+    }
+
+    /// @notice Internal batch claim logic for Autopilot
+    function _claimAutopilotRewardsBatchInternal(uint256 batchSize) internal {
         if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
         
         uint256 length = lockedTokenIds.length;
         if (length == 0) {
-            _setState(PoolState.Voting);
-            emit VotesCast(_gauge, 0);
+            batchInProgress = false;
+            batchIndex = 0;
+            finalizeStep = FinalizeStep.ConvertingToWETH;
+            emit BatchProgress("claimAutopilotRewards", 0, 0);
             return;
         }
 
-        // First batch - initialize and change state immediately
-        if (!batchInProgress) {
-            if (_gauge == address(0)) revert ZeroAddress();
-            
-            // Validate gauge
-            address pool = voter.poolForGauge(_gauge);
-            if (pool == address(0)) revert InvalidGauge();
-            if (!voter.isAlive(_gauge)) revert GaugeNotActive();
-            
-            gauge = _gauge;
-            aerodromePool = pool;
-            
-            batchIndex = 0;
-            batchInProgress = true;
-            
-            // Change state to Voting immediately - this blocks further NFT locks
-            _setState(PoolState.Voting);
-        }
-        
-        // #11: Revalidate gauge on subsequent batches (could be killed mid-process)
-        if (!voter.isAlive(gauge)) {
-            // Gauge was killed - complete voting with what we have
-            batchInProgress = false;
-            batchIndex = 0;
-            emit VotesCast(gauge, totalVotingPower);
-            return;
-        }
-        
-        // #12: Check if epoch changed - complete gracefully instead of reverting
-        uint256 currentEpochStart = EpochLib.currentEpochStart();
-        if (currentEpochStart != aerodromeEpochStart) {
-            // Epoch changed mid-batch - complete voting with current progress
-            batchInProgress = false;
-            batchIndex = 0;
-            emit VotesCast(gauge, totalVotingPower);
-            return;
-        }
-
-        // Calculate end index
         uint256 endIndex = batchIndex + batchSize;
         if (endIndex > length) endIndex = length;
 
-        // Prepare vote arrays
-        address[] memory pools = new address[](1);
-        uint256[] memory weights = new uint256[](1);
-        pools[0] = aerodromePool;
-        weights[0] = 1;
-
-        // Vote with NFTs in this batch
-        // #2: Skip NFTs that fail and update accounting
         for (uint256 i = batchIndex; i < endIndex;) {
             uint256 tokenId = lockedTokenIds[i];
             
-            // Try to vote, skip if fails (deactivated, zero balance, etc.)
-            try voter.vote(tokenId, pools, weights) {
-                // Success - NFT participated
-            } catch {
-                // #2: Mark as skipped and update accounting
-                _skipNFT(tokenId, "vote_failed");
+            if (depositedToAutopilot[tokenId]) {
+                // Claim USDC rewards from Autopilot
+                try autopilot.claim(tokenId) {
+                    emit AutopilotRewardsClaimed(tokenId, 0); // Amount not returned by claim()
+                } catch {
+                    // Continue even if claim fails
+                }
             }
             
             unchecked { ++i; }
         }
 
         batchIndex = endIndex;
-        emit BatchProgress("castVotes", batchIndex, length);
+        emit BatchProgress("claimAutopilotRewards", batchIndex, length);
 
-        // Check if complete
         if (batchIndex >= length) {
             batchInProgress = false;
             batchIndex = 0;
-            // State is already Voting
-            emit VotesCast(gauge, totalVotingPower);
+            finalizeStep = FinalizeStep.ConvertingToWETH;
         }
-    }
-    
-    /// @notice Skip an NFT and update accounting
-    /// @dev #2, #3: Ensures accounting invariants are maintained
-    /// @dev FIND-002/007: Updates participantCount when user has no remaining voting power
-    function _skipNFT(uint256 tokenId, string memory reason) internal {
-        if (isSkipped[tokenId]) return; // Already skipped
-        
-        LockedNFT storage nft = lockedNFTs[tokenId];
-        if (nft.owner == address(0)) return; // Not locked
-        
-        isSkipped[tokenId] = true;
-        skippedTokenIds.push(tokenId);
-        
-        // Update accounting - remove voting power from totals
-        uint256 vp = nft.votingPower;
-        if (vp > 0) {
-            totalVotingPower -= vp;
-            userInfo[nft.owner].totalVotingPower -= vp;
-            // FIND-002/007: Decrement participant count if user has no more voting power
-            if (userInfo[nft.owner].totalVotingPower == 0) {
-                participantCount--;
-            }
-            nft.votingPower = 0; // Mark as having no voting power
-        }
-        
-        emit NFTSkipped(tokenId, reason);
     }
 
-    /// @notice Cast all votes in one transaction (for small number of NFTs)
-    /// @param _gauge The Aerodrome gauge to vote for
-    /// @dev Use castVotesBatch for large numbers of NFTs
-    /// @dev #2: Skips deactivated/failed NFTs and updates accounting
-    function castVotes(address _gauge) external onlyAdmin inState(PoolState.Active) {
+    /// @notice Convert USDC rewards to WETH
+    /// @dev Called after claiming from Autopilot, swaps all USDC to WETH
+    function convertUSDCtoWETH() external nonReentrant onlyAdmin inState(PoolState.Finalizing) {
         if (batchInProgress) revert BatchInProgress();
-        if (_gauge == address(0)) revert ZeroAddress();
-
-        // Validate gauge
-        address pool = voter.poolForGauge(_gauge);
-        if (pool == address(0)) revert InvalidGauge();
-        if (!voter.isAlive(_gauge)) revert GaugeNotActive();
-
-        gauge = _gauge;
-        aerodromePool = pool;
-
-        address[] memory pools = new address[](1);
-        uint256[] memory weights = new uint256[](1);
-        pools[0] = aerodromePool;
-        weights[0] = 1;
-
-        uint256 length = lockedTokenIds.length;
-        for (uint256 i = 0; i < length;) {
-            uint256 tokenId = lockedTokenIds[i];
+        if (finalizeStep != FinalizeStep.ConvertingToWETH) revert InvalidState();
+        
+        uint256 usdcBalance = usdc.balanceOf(address(this));
+        
+        // Only swap if we have USDC (Autopilot rewards)
+        if (usdcBalance > 0) {
+            address routerAddr = address(router);
+            address wethAddr = address(weth);
+            address defaultFactory = router.defaultFactory();
             
-            // #2: Try to vote, skip if fails
-            try voter.vote(tokenId, pools, weights) {
-                // Success
-            } catch {
-                _skipNFT(tokenId, "vote_failed");
+            // Approve router
+            usdc.approve(routerAddr, usdcBalance);
+            
+            // Build route: USDC -> WETH
+            IRouter.Route[] memory routes = new IRouter.Route[](1);
+            routes[0] = IRouter.Route({
+                from: address(usdc),
+                to: wethAddr,
+                stable: false,
+                factory: defaultFactory
+            });
+            
+            // Get minimum output with slippage protection
+            uint256 minOut = _getMinOutputWithSlippage(usdcBalance, routes);
+            uint256 deadline = block.timestamp + deadlineBuffer;
+            
+            if (minOut > 0) {
+                try router.swapExactTokensForTokens(usdcBalance, minOut, routes, address(this), deadline) {
+                    // Success
+                } catch {
+                    // Try stable route
+                    routes[0].stable = true;
+                    minOut = _getMinOutputWithSlippage(usdcBalance, routes);
+                    if (minOut > 0) {
+                        try router.swapExactTokensForTokens(usdcBalance, minOut, routes, address(this), deadline) {
+                        } catch {
+                            // USDC stays in contract for manual handling
+                        }
+                    }
+                }
             }
-            
-            unchecked { ++i; }
         }
-
-        _setState(PoolState.Voting);
-        emit VotesCast(_gauge, totalVotingPower);
+        
+        // Track total claimed rewards (WETH acquired from swapping USDC)
+        uint256 wethAfter = weth.balanceOf(address(this));
+        totalClaimedRewards = wethAfter - wethBeforeFinalization;
+        wethCollected = totalClaimedRewards;
+        
+        finalizeStep = FinalizeStep.AddingLiquidity;
     }
 
-    /// @notice Check voting batch progress
-    /// @return processed Number of NFTs processed
-    /// @return total Total number of NFTs
-    /// @return inProgress Whether batch is in progress
-    function getVotingProgress() external view returns (uint256 processed, uint256 total, bool inProgress) {
-        return (batchIndex, lockedTokenIds.length, batchInProgress);
+    /// @notice Complete the Autopilot finalization by adding liquidity
+    /// @dev Call after convertUSDCtoWETH
+    function completeAutopilotFinalization() external nonReentrant onlyAdmin inState(PoolState.Finalizing) {
+        if (batchInProgress) revert BatchInProgress();
+        if (finalizeStep != FinalizeStep.AddingLiquidity) revert InvalidState();
+
+        // Add liquidity
+        _addLiquidity();
+
+        // Lock LP
+        _lockLP();
+
+        finalizeStep = FinalizeStep.Completed;
+        
+        _setState(PoolState.Completed);
+        emit EpochFinalized(wethCollected, lpCreated);
+    }
+
+    /// @notice Get Autopilot claim progress
+    function getAutopilotClaimProgress() external view returns (
+        FinalizeStep step,
+        uint256 claimProgress,
+        uint256 totalNFTs,
+        bool inProgress
+    ) {
+        return (finalizeStep, batchIndex, lockedTokenIds.length, batchInProgress);
     }
 
     /*//////////////////////////////////////////////////////////////
-                    PHASE 3-5: FINALIZE EPOCH (BATCH)
+                    PHASE 3-5: FINALIZE EPOCH (BATCH) - LEGACY
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Finalize step enum for batch processing
@@ -578,374 +641,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Current finalize step
     FinalizeStep public finalizeStep;
 
-    /// @notice Start claiming rewards in batches with auto-discovery of reward tokens
-    /// @param batchSize Number of NFTs to process per batch
-    /// @dev #7: Handles zero participants by transitioning to Cancelled state
-    /// @dev #10: Uses Aerodrome epoch boundaries for finalization timing
-    function startClaimRewardsBatch(uint256 batchSize) 
-        external 
-        onlyAdmin 
-        inState(PoolState.Voting) 
-    {
-        if (batchInProgress) revert BatchInProgress();
-        
-        // #7: Check for zero effective participants
-        if (totalVotingPower == 0) {
-            _setState(PoolState.Cancelled);
-            uint256 balance = IERC20(projectToken).balanceOf(address(this));
-            if (balance > 0) {
-                IERC20(projectToken).transfer(projectOwner, balance);
-            }
-            emit PoolCancelledEvent(balance);
-            return;
-        }
-        
-        // #10: Ensure Aerodrome epoch has ended
-        uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
-        if (block.timestamp <= aerodromeEpochEnd) revert EpochNotEnded();
-        
-        _setState(PoolState.Finalizing);
-        finalizeStep = FinalizeStep.ClaimingRewards;
-        
-        // Store WETH balance before claiming (for accurate reward tracking including WETH rewards)
-        wethBeforeFinalization = weth.balanceOf(address(this));
-        
-        // Auto-discover and cache reward tokens
-        delete _cachedRewardTokens;
-        address[] memory discovered = _discoverRewardTokens();
-        for (uint256 i = 0; i < discovered.length; i++) {
-            _cachedRewardTokens.push(discovered[i]);
-        }
-        
-        batchIndex = 0;
-        batchInProgress = true;
-        
-        _claimRewardsBatchInternal(batchSize);
-    }
-
-    /// @notice Continue claiming rewards batch
-    /// @param batchSize Number of NFTs to process
-    function continueClaimRewardsBatch(uint256 batchSize) external onlyAdmin inState(PoolState.Finalizing) {
-        if (!batchInProgress) revert NoBatchInProgress();
-        if (finalizeStep != FinalizeStep.ClaimingRewards) revert InvalidState();
-        
-        _claimRewardsBatchInternal(batchSize);
-    }
-
-    /// @notice Internal batch claim logic
-    /// @dev Gets bribe addresses dynamically via gaugeToFees/gaugeToBribe (Aerodrome V2)
-    function _claimRewardsBatchInternal(uint256 batchSize) internal {
-        if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
-        
-        uint256 length = lockedTokenIds.length;
-        if (length == 0) {
-            batchInProgress = false;
-            batchIndex = 0;
-            finalizeStep = FinalizeStep.ConvertingToWETH;
-            emit BatchProgress("claimRewards", 0, 0);
-            return;
-        }
-
-        uint256 endIndex = batchIndex + batchSize;
-        if (endIndex > length) endIndex = length;
-
-        // Get bribe addresses dynamically (works in any epoch)
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-
-        // If no reward contracts found, skip to next step
-        if (feesReward == address(0) && bribeReward == address(0)) {
-            batchInProgress = false;
-            batchIndex = 0;
-            finalizeStep = FinalizeStep.ConvertingToWETH;
-            emit BatchProgress("claimRewards", length, length);
-            return;
-        }
-
-        // Build arrays only with valid (non-zero) addresses
-        uint256 rewardContractCount = (feesReward != address(0) ? 1 : 0) + (bribeReward != address(0) ? 1 : 0);
-        address[] memory rewardContracts = new address[](rewardContractCount);
-        address[][] memory tokenArrays = new address[][](rewardContractCount);
-        
-        uint256 idx = 0;
-        if (feesReward != address(0)) {
-            rewardContracts[idx] = feesReward;
-            tokenArrays[idx] = _cachedRewardTokens;
-            idx++;
-        }
-        if (bribeReward != address(0)) {
-            rewardContracts[idx] = bribeReward;
-            tokenArrays[idx] = _cachedRewardTokens;
-        }
-
-        for (uint256 i = batchIndex; i < endIndex;) {
-            uint256 tokenId = lockedTokenIds[i];
-            // Single call claims from all reward contracts (fees + bribes)
-            try voter.claimBribes(rewardContracts, tokenArrays, tokenId) {} catch {}
-            unchecked { ++i; }
-        }
-
-        batchIndex = endIndex;
-        emit BatchProgress("claimRewards", batchIndex, length);
-
-        if (batchIndex >= length) {
-            batchInProgress = false;
-            batchIndex = 0;
-            finalizeStep = FinalizeStep.ConvertingToWETH;
-        }
-    }
-
-    /// @notice Convert rewards to WETH and complete finalization
-    /// @dev Call after claimRewards batch is complete
-    function completeFinalization() external nonReentrant onlyAdmin inState(PoolState.Finalizing) {
-        if (batchInProgress) revert BatchInProgress();
-        if (finalizeStep != FinalizeStep.ConvertingToWETH) revert InvalidState();
-
-        // Convert all cached tokens to WETH
-        _convertToWETHInternal(_cachedRewardTokens);
-
-        // Add liquidity
-        _addLiquidity();
-
-        // Lock LP
-        _lockLP();
-
-        // Cleanup
-        delete _cachedRewardTokens;
-        finalizeStep = FinalizeStep.Completed;
-        
-        _setState(PoolState.Completed);
-        emit EpochFinalized(wethCollected, lpCreated);
-    }
-
-    /// @notice Finalize the epoch in one transaction (for small number of NFTs)
-    /// @dev Automatically discovers reward tokens from VotingReward contracts
-    /// @dev Use batch functions for large numbers of NFTs
-    /// @dev #7: Handles zero participants by allowing cancellation
-    /// @dev #10: Uses Aerodrome epoch boundaries for finalization timing
-    function finalizeEpoch() external nonReentrant onlyAdmin inState(PoolState.Voting) {
-        if (batchInProgress) revert BatchInProgress();
-        
-        // #7: Check for zero effective participants (all skipped or zero VP)
-        if (totalVotingPower == 0) {
-            // No effective participants - transition to Cancelled state
-            _setState(PoolState.Cancelled);
-            
-            // Return project tokens to owner
-            uint256 balance = IERC20(projectToken).balanceOf(address(this));
-            if (balance > 0) {
-                IERC20(projectToken).transfer(projectOwner, balance);
-            }
-            
-            emit PoolCancelledEvent(balance);
-            return;
-        }
-        
-        // #10: Ensure Aerodrome epoch has ended (not just Kickoff epoch)
-        // Use stored aerodromeEpochStart + 1 week to get Aerodrome epoch end
-        uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
-        if (block.timestamp <= aerodromeEpochEnd) revert EpochNotEnded();
-        
-        _setState(PoolState.Finalizing);
-        
-        // Store WETH balance before claiming (for accurate reward tracking including WETH rewards)
-        wethBeforeFinalization = weth.balanceOf(address(this));
-
-        // Auto-discover reward tokens
-        address[] memory rewardTokens = _discoverRewardTokens();
-
-        // Claim all rewards
-        _claimRewardsAll(rewardTokens);
-
-        // Convert to WETH
-        _convertToWETHInternal(rewardTokens);
-
-        // Add liquidity
-        _addLiquidity();
-
-        // Lock LP
-        _lockLP();
-
-        _setState(PoolState.Completed);
-        emit EpochFinalized(wethCollected, lpCreated);
-    }
-
-    /// @notice Discover reward tokens that have earned rewards for our locked NFTs
-    /// @dev Checks both fees and bribe contracts, returns only tokens with actual rewards
-    /// @return tokens Array of token addresses that have rewards to claim
-    function _discoverRewardTokens() internal view returns (address[] memory tokens) {
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _f) { feesReward = _f; } catch {}
-        try voter.gaugeToBribe(gauge) returns (address _b) { bribeReward = _b; } catch {}
-        
-        // Get tokens with actual rewards from both contracts
-        address[] memory feesTokens = _getTokensWithRewards(feesReward);
-        address[] memory bribeTokens = _getTokensWithRewards(bribeReward);
-        
-        // Combine arrays (deduplicate)
-        return _mergeTokenArrays(feesTokens, bribeTokens);
-    }
-
-    /// @notice Get tokens that have actual earned rewards in a VotingReward contract
-    /// @dev Uses low-level calls for rewardsListLength + rewardsList + earned
-    function _getTokensWithRewards(address rewardContract) internal view returns (address[] memory tokens) {
-        if (rewardContract == address(0)) return new address[](0);
-        
-        // Get rewards list length
-        uint256 length = _getRewardsListLength(rewardContract);
-        if (length == 0) return new address[](0);
-        if (length > 30) length = 30;
-        
-        // Collect tokens that have rewards
-        address[] memory tempTokens = new address[](length);
-        uint256 validCount = 0;
-        
-        for (uint256 i = 0; i < length; i++) {
-            address token = _getRewardTokenAt(rewardContract, i);
-            if (token == address(0)) continue;
-            
-            if (_hasEarnedRewards(rewardContract, token)) {
-                tempTokens[validCount++] = token;
-            }
-        }
-        
-        // Copy to correctly sized array
-        tokens = new address[](validCount);
-        for (uint256 i = 0; i < validCount; i++) {
-            tokens[i] = tempTokens[i];
-        }
-    }
-
-    /// @notice Get rewardsListLength from a VotingReward contract
-    function _getRewardsListLength(address rewardContract) internal view returns (uint256) {
-        (bool success, bytes memory data) = rewardContract.staticcall(
-            abi.encodeWithSignature("rewardsListLength()")
-        );
-        if (!success || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
-    }
-
-    /// @notice Get reward token at index from a VotingReward contract
-    /// @dev Aerodrome uses `rewards` array, so getter is rewards(uint256)
-    function _getRewardTokenAt(address rewardContract, uint256 index) internal view returns (address) {
-        // Aerodrome VotingReward stores tokens in `rewards` array
-        (bool success, bytes memory data) = rewardContract.staticcall(
-            abi.encodeWithSignature("rewards(uint256)", index)
-        );
-        if (success && data.length >= 32) {
-            return abi.decode(data, (address));
-        }
-        return address(0);
-    }
-
-    /// @notice Check if any locked NFT has earned rewards for a token
-    /// @dev Checks all NFTs - if any has rewards, returns true immediately
-    function _hasEarnedRewards(address rewardContract, address token) internal view returns (bool) {
-        uint256 nftCount = lockedTokenIds.length;
-        
-        for (uint256 i = 0; i < nftCount; i++) {
-            (bool success, bytes memory data) = rewardContract.staticcall(
-                abi.encodeWithSignature("earned(address,uint256)", token, lockedTokenIds[i])
-            );
-            if (success && data.length >= 32) {
-                uint256 earned = abi.decode(data, (uint256));
-                if (earned > 0) return true;
-            }
-        }
-        return false;
-    }
-
-    /// @notice Merge two token arrays and remove duplicates
-    function _mergeTokenArrays(address[] memory a, address[] memory b) internal pure returns (address[] memory) {
-        if (a.length == 0) return b;
-        if (b.length == 0) return a;
-        
-        // Combine with deduplication
-        address[] memory temp = new address[](a.length + b.length);
-        uint256 count = 0;
-        
-        // Add all from a
-        for (uint256 i = 0; i < a.length; i++) {
-            temp[count++] = a[i];
-        }
-        
-        // Add from b if not duplicate
-        for (uint256 i = 0; i < b.length; i++) {
-            bool isDuplicate = false;
-            for (uint256 j = 0; j < a.length; j++) {
-                if (b[i] == a[j]) {
-                    isDuplicate = true;
-                    break;
-                }
-            }
-            if (!isDuplicate) {
-                temp[count++] = b[i];
-            }
-        }
-        
-        // Copy to correctly sized array
-        address[] memory result = new address[](count);
-        for (uint256 i = 0; i < count; i++) {
-            result[i] = temp[i];
-        }
-        return result;
-    }
-
-    /// @notice Claim all rewards in one transaction
-    /// @dev Gets bribe addresses dynamically via gaugeToFees/gaugeToBribe (Aerodrome V2)
-    function _claimRewardsAll(address[] memory rewardTokens) internal {
-        // Get bribe addresses dynamically (works in any epoch)
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-
-        // If no reward contracts found, skip claiming
-        if (feesReward == address(0) && bribeReward == address(0)) {
-            return;
-        }
-
-        // Build arrays only with valid (non-zero) addresses
-        uint256 rewardContractCount = (feesReward != address(0) ? 1 : 0) + (bribeReward != address(0) ? 1 : 0);
-        address[] memory rewardContracts = new address[](rewardContractCount);
-        address[][] memory tokenArrays = new address[][](rewardContractCount);
-        
-        uint256 idx = 0;
-        if (feesReward != address(0)) {
-            rewardContracts[idx] = feesReward;
-            tokenArrays[idx] = rewardTokens;
-            idx++;
-        }
-        if (bribeReward != address(0)) {
-            rewardContracts[idx] = bribeReward;
-            tokenArrays[idx] = rewardTokens;
-        }
-
-        uint256 length = lockedTokenIds.length;
-        for (uint256 i = 0; i < length;) {
-            uint256 tokenId = lockedTokenIds[i];
-            // Single call claims from all reward contracts (fees + bribes)
-            try voter.claimBribes(rewardContracts, tokenArrays, tokenId) {} catch {}
-            unchecked { ++i; }
-        }
-    }
-
     /// @notice Get finalize progress
     function getFinalizeProgress() external view returns (
         FinalizeStep step,
@@ -954,71 +649,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
         bool inProgress
     ) {
         return (finalizeStep, batchIndex, lockedTokenIds.length, batchInProgress);
-    }
-
-    /// @notice Convert reward tokens to WETH with slippage protection
-    /// @dev #9: Skips swap when no reliable quote is available
-    /// @dev Uses wethBeforeFinalization (set at start of finalization) for accurate reward tracking
-    function _convertToWETHInternal(address[] memory rewardTokens) internal {
-        address routerAddr = address(router);
-        address wethAddr = address(weth);
-        address defaultFactory = router.defaultFactory();
-
-        uint256 length = rewardTokens.length;
-        for (uint256 i = 0; i < length;) {
-            address token = rewardTokens[i];
-
-            // Skip WETH
-            if (token == wethAddr) {
-                unchecked { ++i; }
-                continue;
-            }
-
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance > 0) {
-                // Approve router
-                IERC20(token).approve(routerAddr, balance);
-
-                // Try to swap to WETH with slippage protection
-                IRouter.Route[] memory routes = new IRouter.Route[](1);
-                routes[0] = IRouter.Route({
-                    from: token,
-                    to: wethAddr,
-                    stable: false,
-                    factory: defaultFactory
-                });
-
-                // #9: Get expected output - skip if no reliable quote
-                uint256 minOut = _getMinOutputWithSlippage(balance, routes);
-                
-                // Skip swap if no reliable quote (minOut == 0)
-                // #6: Use deadline buffer for meaningful deadline protection
-                uint256 deadline = block.timestamp + deadlineBuffer;
-                if (minOut > 0) {
-                    try router.swapExactTokensForTokens(balance, minOut, routes, address(this), deadline) {}
-                    catch {
-                        // Try stable route with slippage
-                        routes[0].stable = true;
-                        minOut = _getMinOutputWithSlippage(balance, routes);
-                        if (minOut > 0) {
-                            try router.swapExactTokensForTokens(balance, minOut, routes, address(this), deadline) {}
-                            catch {
-                                // Token stays on contract for manual rescue
-                            }
-                        }
-                    }
-                }
-                // If minOut == 0, token stays for manual rescue
-            }
-
-            unchecked { ++i; }
-        }
-
-        // Track actual claimed rewards using wethBeforeFinalization
-        // This correctly accounts for WETH received directly as rewards (not swapped)
-        uint256 wethAfter = weth.balanceOf(address(this));
-        totalClaimedRewards = wethAfter - wethBeforeFinalization;
-        wethCollected = totalClaimedRewards;
     }
 
     /// @notice Calculate minimum output with slippage tolerance
@@ -1100,6 +730,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Unlock a veAERO NFT after epoch completion
     /// @param tokenId The NFT token ID to unlock
+    /// @dev Automatically withdraws from Autopilot if still deposited
+    /// @dev Rewards were already claimed during finalization, no claim needed here
     function unlockVeAERO(uint256 tokenId) external nonReentrant inState(PoolState.Completed) {
         LockedNFT storage nft = lockedNFTs[tokenId];
 
@@ -1107,6 +739,17 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (nft.unlocked) revert NFTNotLocked();
 
         nft.unlocked = true;
+        
+        // If NFT is still in Autopilot, withdraw it first
+        // Note: Rewards were already claimed during finalization, no need to claim here
+        if (depositedToAutopilot[tokenId]) {
+            // Ensure we're outside Autopilot's special window
+            if (!_isOutsideAutopilotSpecialWindow()) revert InAutopilotSpecialWindow();
+            
+            autopilot.withdraw(tokenId);
+            depositedToAutopilot[tokenId] = false;
+            emit WithdrawnFromAutopilot(tokenId);
+        }
 
         // Transfer NFT back to owner
         votingEscrow.safeTransferFrom(address(this), msg.sender, tokenId);
@@ -1161,7 +804,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         
         uint256 balance = IERC20(projectToken).balanceOf(address(this));
         if (balance > 0) {
-            IERC20(projectToken).transfer(projectOwner, balance);
+            _safeTransferProjectToken(projectOwner, balance);
             emit TokensRescued(projectToken, projectOwner, balance);
         }
     }
@@ -1173,6 +816,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Emergency withdraw a single NFT
     /// @param tokenId The NFT token ID
     /// @dev #3: Updates accounting invariants when withdrawing
+    /// @dev Handles NFTs deposited to Autopilot by withdrawing first
+    /// @dev If Autopilot withdraw fails (e.g., during special window), NFT is marked unlocked
+    ///      but stays in Autopilot. Use retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
     function emergencyWithdrawNFT(uint256 tokenId) external onlyOwner {
         LockedNFT storage nft = lockedNFTs[tokenId];
 
@@ -1183,7 +829,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         
         // #3: Update accounting before marking as unlocked
         uint256 vp = nft.votingPower;
-        if (vp > 0 && !isSkipped[tokenId]) {
+        if (vp > 0) {
             totalVotingPower -= vp;
             userInfo[nftOwner].totalVotingPower -= vp;
             // FIND-002/007: Decrement participant count if user has no more voting power
@@ -1193,6 +839,21 @@ contract KickoffVoteSalePool is IERC721Receiver {
         }
         
         nft.unlocked = true;
+
+        // If NFT is in Autopilot, try to withdraw it
+        if (depositedToAutopilot[tokenId]) {
+            try autopilot.claim(tokenId) {} catch {}
+            try autopilot.withdraw(tokenId) {
+                depositedToAutopilot[tokenId] = false;
+                emit WithdrawnFromAutopilot(tokenId);
+            } catch {
+                // Autopilot withdraw failed (likely during special window)
+                // NFT is marked unlocked but stays in Autopilot
+                // Owner must call retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
+                emit BatchProgress("autopilotWithdrawFailed", tokenId, 0);
+                return; // Don't transfer - NFT still in Autopilot
+            }
+        }
 
         // Transfer NFT back to original owner
         votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
@@ -1245,6 +906,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Internal single NFT emergency withdraw
     /// @dev #3: Updates accounting invariants
     /// @dev FIND-002/007: Updates participantCount when user has no remaining voting power
+    /// @dev Handles NFTs deposited to Autopilot - if withdraw fails, NFT stays in Autopilot
     function _emergencyWithdrawSingle(uint256 tokenId) internal {
         LockedNFT storage nft = lockedNFTs[tokenId];
 
@@ -1253,7 +915,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
             
             // #3: Update accounting before marking as unlocked
             uint256 vp = nft.votingPower;
-            if (vp > 0 && !isSkipped[tokenId]) {
+            if (vp > 0) {
                 totalVotingPower -= vp;
                 userInfo[nftOwner].totalVotingPower -= vp;
                 // FIND-002/007: Decrement participant count if user has no more voting power
@@ -1263,9 +925,123 @@ contract KickoffVoteSalePool is IERC721Receiver {
             }
             
             nft.unlocked = true;
-            votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
-            emit EmergencyWithdraw(nftOwner, tokenId);
+            
+            // If NFT is in Autopilot, try to withdraw it
+            if (depositedToAutopilot[tokenId]) {
+                try autopilot.claim(tokenId) {} catch {}
+                try autopilot.withdraw(tokenId) {
+                    depositedToAutopilot[tokenId] = false;
+                    emit WithdrawnFromAutopilot(tokenId);
+                } catch {
+                    // Autopilot withdraw failed - NFT marked unlocked but stays in Autopilot
+                    // Owner must call retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
+                }
+            }
+            
+            // Only transfer if not still in Autopilot
+            if (!depositedToAutopilot[tokenId]) {
+                votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
+                emit EmergencyWithdraw(nftOwner, tokenId);
+            }
         }
+    }
+
+    /// @notice Retry withdrawing NFTs from Autopilot that failed during emergency withdraw
+    /// @param tokenIds Array of token IDs to retry withdrawal for
+    /// @dev Call this after special window ends if emergency withdraw left NFTs in Autopilot
+    /// @dev After successful retry, users can call claimUnlockedNFT() to get their NFTs
+    function retryAutopilotWithdraw(uint256[] calldata tokenIds) external onlyOwner {
+        for (uint256 i = 0; i < tokenIds.length;) {
+            uint256 tokenId = tokenIds[i];
+            LockedNFT storage nft = lockedNFTs[tokenId];
+            
+            // Only process if unlocked but still in Autopilot
+            if (nft.unlocked && depositedToAutopilot[tokenId]) {
+                try autopilot.claim(tokenId) {} catch {}
+                try autopilot.withdraw(tokenId) {
+                    depositedToAutopilot[tokenId] = false;
+                    emit WithdrawnFromAutopilot(tokenId);
+                } catch {
+                    // Still failed - will need another retry
+                }
+            }
+            unchecked { ++i; }
+        }
+    }
+
+    /// @notice Claim an unlocked NFT that was stuck in Autopilot
+    /// @param tokenId The NFT token ID to claim
+    /// @dev Only callable by original NFT owner after owner has successfully called retryAutopilotWithdraw()
+    function claimUnlockedNFT(uint256 tokenId) external nonReentrant {
+        LockedNFT storage nft = lockedNFTs[tokenId];
+        
+        if (nft.owner != msg.sender) revert NotNFTOwner();
+        if (!nft.unlocked) revert NFTNotLocked();
+        if (depositedToAutopilot[tokenId]) revert StillInAutopilot(); // Wait for owner to call retryAutopilotWithdraw()
+        
+        // Check NFT is still owned by this contract (not already transferred)
+        if (votingEscrow.ownerOf(tokenId) != address(this)) revert NFTNotLocked();
+        
+        // Transfer NFT back to owner
+        votingEscrow.safeTransferFrom(address(this), msg.sender, tokenId);
+        
+        emit VeAEROUnlocked(msg.sender, tokenId);
+    }
+
+    /// @notice Check if an NFT is stuck (unlocked but still in Autopilot)
+    /// @param tokenId The NFT token ID to check
+    /// @return isStuck True if NFT needs retryAutopilotWithdraw()
+    /// @return nftOwner Original owner of the NFT
+    function isNFTStuckInAutopilot(uint256 tokenId) external view returns (bool isStuck, address nftOwner) {
+        LockedNFT storage nft = lockedNFTs[tokenId];
+        return (nft.unlocked && depositedToAutopilot[tokenId], nft.owner);
+    }
+
+    /// @notice Get NFT IDs that are stuck in Autopilot (paginated)
+    /// @param startIndex Starting index in lockedTokenIds array
+    /// @param limit Maximum number of results (0 = 100)
+    /// @return stuckIds Array of token IDs that need retryAutopilotWithdraw()
+    /// @return totalCount Total number of locked NFTs (for pagination)
+    /// @return stuckCount Total number of stuck NFTs found in this page
+    function getStuckNFTIdsPaginated(
+        uint256 startIndex,
+        uint256 limit
+    ) external view returns (
+        uint256[] memory stuckIds,
+        uint256 totalCount,
+        uint256 stuckCount
+    ) {
+        totalCount = lockedTokenIds.length;
+        
+        if (startIndex >= totalCount) {
+            return (new uint256[](0), totalCount, 0);
+        }
+        
+        if (limit == 0) limit = 100;
+        
+        uint256 endIndex = startIndex + limit;
+        if (endIndex > totalCount) endIndex = totalCount;
+        
+        // First pass: count stuck NFTs in range
+        uint256 count = 0;
+        for (uint256 i = startIndex; i < endIndex; i++) {
+            uint256 tokenId = lockedTokenIds[i];
+            if (lockedNFTs[tokenId].unlocked && depositedToAutopilot[tokenId]) {
+                count++;
+            }
+        }
+        
+        // Second pass: populate array
+        stuckIds = new uint256[](count);
+        uint256 index = 0;
+        for (uint256 i = startIndex; i < endIndex; i++) {
+            uint256 tokenId = lockedTokenIds[i];
+            if (lockedNFTs[tokenId].unlocked && depositedToAutopilot[tokenId]) {
+                stuckIds[index++] = tokenId;
+            }
+        }
+        
+        stuckCount = count;
     }
 
     /// @notice Get emergency withdraw progress
@@ -1278,18 +1054,23 @@ contract KickoffVoteSalePool is IERC721Receiver {
     }
     
     /// @notice Cancel the pool and enable project token recovery
-    /// @dev #7, #20: Only callable in Active state before voting starts
-    /// @dev Requires all NFTs to be emergency withdrawn first
+    /// @dev Can be called in any state except Completed (for emergency recovery)
+    /// @dev Requires all NFTs to be emergency withdrawn AND not stuck in Autopilot
     function cancelPool() external onlyOwner {
-        // Can only cancel before voting starts
-        if (state != PoolState.Active && state != PoolState.Inactive) revert InvalidState();
+        // Cannot cancel a completed pool
+        if (state == PoolState.Completed) revert InvalidState();
+        if (state == PoolState.Cancelled) revert InvalidState();
         if (batchInProgress) revert BatchInProgress();
         
-        // Ensure all NFTs are withdrawn
+        // Ensure all NFTs are withdrawn AND not stuck in Autopilot
         uint256 length = lockedTokenIds.length;
         for (uint256 i = 0; i < length; i++) {
-            if (!lockedNFTs[lockedTokenIds[i]].unlocked) {
+            uint256 tokenId = lockedTokenIds[i];
+            if (!lockedNFTs[tokenId].unlocked) {
                 revert NFTNotLocked(); // Still has locked NFTs
+            }
+            if (depositedToAutopilot[tokenId]) {
+                revert StillInAutopilot(); // NFT stuck in Autopilot - call retryAutopilotWithdraw first
             }
         }
         
@@ -1298,29 +1079,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Transfer project tokens back to project owner
         uint256 balance = IERC20(projectToken).balanceOf(address(this));
         if (balance > 0) {
-            IERC20(projectToken).transfer(projectOwner, balance);
+            _safeTransferProjectToken(projectOwner, balance);
         }
         
         emit PoolCancelledEvent(balance);
-    }
-    
-    /// @notice Return skipped NFTs to their owners
-    /// @dev Called after voting completes to return NFTs that couldn't vote
-    function returnSkippedNFTs() external onlyOwner {
-        uint256 length = skippedTokenIds.length;
-        for (uint256 i = 0; i < length;) {
-            uint256 tokenId = skippedTokenIds[i];
-            LockedNFT storage nft = lockedNFTs[tokenId];
-            
-            if (!nft.unlocked && nft.owner != address(0)) {
-                address nftOwner = nft.owner;
-                nft.unlocked = true;
-                votingEscrow.safeTransferFrom(address(this), nftOwner, tokenId);
-                emit VeAEROUnlocked(nftOwner, tokenId);
-            }
-            
-            unchecked { ++i; }
-        }
     }
 
     /// @notice Rescue stuck tokens (cannot rescue project tokens unless Cancelled)
@@ -1381,11 +1143,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
     function getLockedTokenIds() external view returns (uint256[] memory) {
         return lockedTokenIds;
     }
-    
-    /// @notice Get all skipped token IDs
-    /// @return Array of skipped token IDs  
-    function getSkippedTokenIds() external view returns (uint256[] memory) {
-        return skippedTokenIds;
+
+    /// @notice Get the number of locked NFTs
+    /// @return Number of locked token IDs
+    function getLockedTokenIdsLength() external view returns (uint256) {
+        return lockedTokenIds.length;
     }
 
     // NOTE: View functions moved to KickoffPoolReader for bytecode optimization:
@@ -1420,6 +1182,17 @@ contract KickoffVoteSalePool is IERC721Receiver {
         PoolState previousState = state;
         state = newState;
         emit StateChanged(previousState, newState);
+    }
+
+    /// @notice Safe transfer helper for project tokens
+    /// @dev Handles non-standard ERC20 tokens that don't return bool
+    function _safeTransferProjectToken(address to, uint256 amount) internal {
+        (bool success, bytes memory data) = projectToken.call(
+            abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
+        );
+        if (!success || (data.length > 0 && !abi.decode(data, (bool)))) {
+            revert TransferFailed();
+        }
     }
 }
 

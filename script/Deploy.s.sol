@@ -235,13 +235,17 @@ contract DeployVoteSaleOnly is Script {
 /**
  * @title DeployLPLockerOnly
  * @notice Deploy only LPLocker (for manual pool creation)
- * @dev IMPORTANT: After deployment, setFactory() MUST be called to enable lockLP().
+ * @dev IMPORTANT: After deployment, setFactory() MUST be called by the deployer to enable lockLP().
+ *      Only the deployer (this script) can call setFactory() due to access control.
  *      Only pools registered in the factory via isPool() can call lockLP().
  * 
  * Usage:
  *   forge script script/Deploy.s.sol:DeployLPLockerOnly \
  *     --rpc-url https://mainnet.base.org \
  *     --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY -vvvv
+ * 
+ * After deployment, in a separate script call:
+ *   locker.setFactory(factoryAddress)
  */
 contract DeployLPLockerOnly is Script {
     function run() external {
@@ -259,8 +263,10 @@ contract DeployLPLockerOnly is Script {
 
         console.log("");
         console.log("LPLocker:", address(locker));
+        console.log("LPLocker Deployer:", deployer);
         console.log("");
-        console.log("IMPORTANT: Call setFactory(factoryAddress) to enable lockLP()");
+        console.log("IMPORTANT: Only the deployer can call setFactory()!");
+        console.log("Call locker.setFactory(factoryAddress) from the same wallet to enable lockLP().");
         console.log("Only pools registered via factory.isPool() can lock LP tokens.");
     }
 }
@@ -296,9 +302,6 @@ contract DeployPoolReader is Script {
 /**
  * @title DeployVoteSaleDirect
  * @notice DEPRECATED: Use DeployVoteSaleOnly instead
- * @dev This script is deprecated because LPLocker now requires factory linkage for security.
- *      Without a factory, lockLP() will revert with NotVoteSalePool.
- *      Use DeployVoteSaleOnly which deploys KickoffFactory (includes LPLocker).
  */
 contract DeployVoteSaleDirect is Script {
     function run() external pure {

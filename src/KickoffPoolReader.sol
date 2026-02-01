@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IVoter} from "./interfaces/IVoter.sol";
-import {IVotingReward} from "./interfaces/IVotingReward.sol";
-
 /// @title IKickoffVoteSalePoolReader
 /// @notice Interface for reading data from KickoffVoteSalePool
 interface IKickoffVoteSalePoolReader {
-    function gauge() external view returns (address);
-    function voter() external view returns (IVoter);
     function lockedTokenIds(uint256 index) external view returns (uint256);
     function getLockedTokenIds() external view returns (uint256[] memory);
+    function getLockedTokenIdsLength() external view returns (uint256);
     function totalVotingPower() external view returns (uint256);
     function saleAllocation() external view returns (uint256);
+    function participantCount() external view returns (uint256);
+    function depositedToAutopilot(uint256 tokenId) external view returns (bool);
     
     struct UserInfo {
         uint256 totalVotingPower;
@@ -28,161 +26,92 @@ interface IKickoffVoteSalePoolReader {
     function lockedNFTs(uint256 tokenId) external view returns (address owner, uint256 votingPower, bool unlocked);
 }
 
+/// @title IAutopilotReader
+/// @notice Interface for reading Autopilot data
+interface IAutopilotReader {
+    function getPendingRewards(address owner, uint256 lockId) external view returns (uint256);
+    function rewards_token() external view returns (address);
+}
+
 /// @title KickoffPoolReader
 /// @notice Read-only helper contract for KickoffVoteSalePool view functions
 /// @dev Reduces VoteSalePool bytecode size by moving complex view logic here
 /// @dev This contract has NO write permissions - purely reads public data
 contract KickoffPoolReader {
     
+    /// @notice Autopilot contract address on Base mainnet
+    address public constant AUTOPILOT = 0x35cbd6982334e377e05F16DB14DcC1d191644D5c;
+
+    /// @notice Default page size for paginated queries
+    uint256 public constant DEFAULT_PAGE_SIZE = 100;
+
     /*//////////////////////////////////////////////////////////////
-                          REWARD FUNCTIONS
+                         AUTOPILOT FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Get pending rewards for a specific NFT
+    /// @notice Get pending USDC rewards from Autopilot for a specific NFT
     /// @param pool The KickoffVoteSalePool address
     /// @param tokenId The veAERO NFT token ID
-    /// @param rewardTokens Array of reward token addresses to check
-    /// @return feesEarned Array of earned amounts from fees (LP trading fees)
-    /// @return bribesEarned Array of earned amounts from bribes (external)
-    function getPendingRewards(
+    /// @return pendingRewards Amount of pending USDC rewards
+    function getAutopilotPendingRewards(
         address pool,
-        uint256 tokenId, 
-        address[] calldata rewardTokens
-    ) external view returns (uint256[] memory feesEarned, uint256[] memory bribesEarned) {
-        feesEarned = new uint256[](rewardTokens.length);
-        bribesEarned = new uint256[](rewardTokens.length);
-        
+        uint256 tokenId
+    ) external view returns (uint256 pendingRewards) {
         IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
-        address gauge = poolContract.gauge();
         
-        if (gauge == address(0)) return (feesEarned, bribesEarned);
-        
-        IVoter voter = poolContract.voter();
-        
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-        
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            if (feesReward != address(0)) {
-                try IVotingReward(feesReward).earned(rewardTokens[i], tokenId) returns (uint256 amount) {
-                    feesEarned[i] = amount;
-                } catch {}
-            }
-            if (bribeReward != address(0)) {
-                try IVotingReward(bribeReward).earned(rewardTokens[i], tokenId) returns (uint256 amount) {
-                    bribesEarned[i] = amount;
-                } catch {}
-            }
+        // Check if NFT is deposited to Autopilot
+        if (!poolContract.depositedToAutopilot(tokenId)) {
+            return 0;
         }
-    }
-
-    /// @notice Get reward contract addresses for the pool's gauge
-    /// @param pool The KickoffVoteSalePool address
-    /// @return feesReward The fees reward contract (LP trading fees)
-    /// @return bribeReward The bribe reward contract (external bribes)
-    function getRewardContracts(address pool) external view returns (address feesReward, address bribeReward) {
-        IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
-        address gauge = poolContract.gauge();
         
-        if (gauge == address(0)) return (address(0), address(0));
-        
-        IVoter voter = poolContract.voter();
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
+        try IAutopilotReader(AUTOPILOT).getPendingRewards(pool, tokenId) returns (uint256 amount) {
+            pendingRewards = amount;
         } catch {}
     }
 
-    /// @notice Get all available reward tokens from fees and bribe contracts
+    /// @notice Get total pending USDC rewards from Autopilot (PAGINATED)
     /// @param pool The KickoffVoteSalePool address
-    /// @return feesTokens Array of token addresses from fees contract
-    /// @return bribeTokens Array of token addresses from bribe contract
-    function getAvailableRewardTokens(address pool) external view returns (
-        address[] memory feesTokens,
-        address[] memory bribeTokens
-    ) {
-        IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
-        address gauge = poolContract.gauge();
-        
-        if (gauge == address(0)) return (new address[](0), new address[](0));
-        
-        IVoter voter = poolContract.voter();
-        
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-        
-        feesTokens = _getRewardTokens(feesReward);
-        bribeTokens = _getRewardTokens(bribeReward);
-    }
-
-    /// @notice Get total claimable rewards for all locked NFTs in the pool
-    /// @param pool The KickoffVoteSalePool address
-    /// @param rewardTokens Array of token addresses to check
-    /// @return amounts Array of total claimable amounts for each token
-    function getTotalClaimableRewards(
+    /// @param startIndex Starting index in lockedTokenIds array
+    /// @param limit Maximum number of NFTs to check (0 = DEFAULT_PAGE_SIZE)
+    /// @return totalPending Total pending USDC rewards for this page
+    /// @return processedCount Number of NFTs processed in this page
+    /// @return totalCount Total number of locked NFTs
+    function getTotalAutopilotPendingRewardsPaginated(
         address pool,
-        address[] calldata rewardTokens
-    ) external view returns (uint256[] memory amounts) {
-        amounts = new uint256[](rewardTokens.length);
-        
+        uint256 startIndex,
+        uint256 limit
+    ) external view returns (uint256 totalPending, uint256 processedCount, uint256 totalCount) {
         IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
-        address gauge = poolContract.gauge();
+        totalCount = poolContract.getLockedTokenIdsLength();
         
-        uint256[] memory tokenIds = poolContract.getLockedTokenIds();
+        if (startIndex >= totalCount) {
+            return (0, 0, totalCount);
+        }
         
-        if (gauge == address(0) || tokenIds.length == 0) return amounts;
+        if (limit == 0) limit = DEFAULT_PAGE_SIZE;
         
-        IVoter voter = poolContract.voter();
+        uint256 endIndex = startIndex + limit;
+        if (endIndex > totalCount) endIndex = totalCount;
         
-        address feesReward;
-        address bribeReward;
-        
-        try voter.gaugeToFees(gauge) returns (address _fees) {
-            feesReward = _fees;
-        } catch {}
-        
-        try voter.gaugeToBribe(gauge) returns (address _bribe) {
-            bribeReward = _bribe;
-        } catch {}
-        
-        // Sum up rewards across all locked NFTs
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            uint256 tokenId = tokenIds[i];
+        for (uint256 i = startIndex; i < endIndex; i++) {
+            uint256 tokenId = poolContract.lockedTokenIds(i);
             
-            for (uint256 j = 0; j < rewardTokens.length; j++) {
-                if (feesReward != address(0)) {
-                    try IVotingReward(feesReward).earned(rewardTokens[j], tokenId) returns (uint256 earned) {
-                        amounts[j] += earned;
-                    } catch {}
-                }
-                
-                if (bribeReward != address(0)) {
-                    try IVotingReward(bribeReward).earned(rewardTokens[j], tokenId) returns (uint256 earned) {
-                        amounts[j] += earned;
-                    } catch {}
-                }
+            if (poolContract.depositedToAutopilot(tokenId)) {
+                try IAutopilotReader(AUTOPILOT).getPendingRewards(pool, tokenId) returns (uint256 amount) {
+                    totalPending += amount;
+                } catch {}
             }
         }
+        
+        processedCount = endIndex - startIndex;
+    }
+
+    /// @notice Get Autopilot rewards token address (USDC)
+    /// @return rewardsToken The USDC token address
+    function getAutopilotRewardsToken() external view returns (address rewardsToken) {
+        try IAutopilotReader(AUTOPILOT).rewards_token() returns (address token) {
+            rewardsToken = token;
+        } catch {}
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -213,33 +142,101 @@ contract KickoffPoolReader {
     /// @return owner The original owner
     /// @return votingPower The voting power
     /// @return unlocked Whether it's been unlocked
+    /// @return inAutopilot Whether it's deposited in Autopilot
     function getLockedNFTInfo(address pool, uint256 tokenId)
-        external view returns (address owner, uint256 votingPower, bool unlocked)
+        external view returns (address owner, uint256 votingPower, bool unlocked, bool inAutopilot)
     {
-        return IKickoffVoteSalePoolReader(pool).lockedNFTs(tokenId);
+        IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
+        (owner, votingPower, unlocked) = poolContract.lockedNFTs(tokenId);
+        inAutopilot = poolContract.depositedToAutopilot(tokenId);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                        INTERNAL FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
+    /// @notice Get pool statistics
+    /// @param pool The KickoffVoteSalePool address
+    /// @return totalVotingPower Total voting power locked
+    /// @return participantCount Number of unique participants
+    /// @return nftCount Number of locked NFTs
+    /// @return saleAllocation Total tokens for sale
+    function getPoolStats(address pool) external view returns (
+        uint256 totalVotingPower,
+        uint256 participantCount,
+        uint256 nftCount,
+        uint256 saleAllocation
+    ) {
+        IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
+        totalVotingPower = poolContract.totalVotingPower();
+        participantCount = poolContract.participantCount();
+        nftCount = poolContract.getLockedTokenIdsLength();
+        saleAllocation = poolContract.saleAllocation();
+    }
 
-    /// @notice Get all reward tokens from a reward contract
-    function _getRewardTokens(address rewardContract) internal view returns (address[] memory tokens) {
-        if (rewardContract == address(0)) return new address[](0);
+    /// @notice Get locked NFT IDs with Autopilot status (PAGINATED)
+    /// @param pool The KickoffVoteSalePool address
+    /// @param startIndex Starting index in lockedTokenIds array
+    /// @param limit Maximum number of NFTs to return (0 = DEFAULT_PAGE_SIZE)
+    /// @return tokenIds Array of locked token IDs for this page
+    /// @return inAutopilot Array of booleans indicating Autopilot deposit status
+    /// @return totalCount Total number of locked NFTs
+    function getLockedNFTsWithStatusPaginated(
+        address pool,
+        uint256 startIndex,
+        uint256 limit
+    ) external view returns (
+        uint256[] memory tokenIds,
+        bool[] memory inAutopilot,
+        uint256 totalCount
+    ) {
+        IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
+        totalCount = poolContract.getLockedTokenIdsLength();
         
-        uint256 length;
-        try IVotingReward(rewardContract).rewardsListLength() returns (uint256 len) {
-            length = len;
-        } catch {
-            return new address[](0);
+        if (startIndex >= totalCount) {
+            return (new uint256[](0), new bool[](0), totalCount);
         }
         
-        tokens = new address[](length);
+        if (limit == 0) limit = DEFAULT_PAGE_SIZE;
+        
+        uint256 endIndex = startIndex + limit;
+        if (endIndex > totalCount) endIndex = totalCount;
+        
+        uint256 resultLength = endIndex - startIndex;
+        tokenIds = new uint256[](resultLength);
+        inAutopilot = new bool[](resultLength);
+        
+        for (uint256 i = 0; i < resultLength; i++) {
+            uint256 tokenId = poolContract.lockedTokenIds(startIndex + i);
+            tokenIds[i] = tokenId;
+            inAutopilot[i] = poolContract.depositedToAutopilot(tokenId);
+        }
+    }
+
+    /// @notice Get multiple NFT infos in a single call (for specific token IDs)
+    /// @param pool The KickoffVoteSalePool address
+    /// @param tokenIds Array of token IDs to query
+    /// @return owners Array of owners
+    /// @return votingPowers Array of voting powers
+    /// @return unlockeds Array of unlocked flags
+    /// @return inAutopilots Array of Autopilot deposit flags
+    function getMultipleNFTInfos(
+        address pool,
+        uint256[] calldata tokenIds
+    ) external view returns (
+        address[] memory owners,
+        uint256[] memory votingPowers,
+        bool[] memory unlockeds,
+        bool[] memory inAutopilots
+    ) {
+        IKickoffVoteSalePoolReader poolContract = IKickoffVoteSalePoolReader(pool);
+        uint256 length = tokenIds.length;
+        
+        owners = new address[](length);
+        votingPowers = new uint256[](length);
+        unlockeds = new bool[](length);
+        inAutopilots = new bool[](length);
+        
         for (uint256 i = 0; i < length; i++) {
-            try IVotingReward(rewardContract).rewardsList(i) returns (address token) {
-                tokens[i] = token;
-            } catch {}
+            uint256 tokenId = tokenIds[i];
+            (owners[i], votingPowers[i], unlockeds[i]) = poolContract.lockedNFTs(tokenId);
+            inAutopilots[i] = poolContract.depositedToAutopilot(tokenId);
         }
     }
 }
-

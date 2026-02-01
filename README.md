@@ -85,6 +85,7 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 | `IVotingReward` | Aerodrome VotingReward contracts (FeesVotingReward, BribeVotingReward) |
 | `IVoter` | Aerodrome Voter contract |
 | `IVotingEscrow` | Aerodrome veAERO NFT contract |
+| `IAutopilot` | Autopilot PermanentLocksPoolV1 for vAPR optimization |
 
 ## Features
 
@@ -96,12 +97,14 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 - **Gas optimized**: MAX_ALLOCATIONS limit prevents DoS
 
 ### Vote-Sale
-- **Auto-discovery** of reward tokens (fees & bribes)
+- **Autopilot integration** for automated vAPR optimization
+- **USDC rewards** automatically converted to WETH for LP creation
 - **Batch processing** for 100+ veAERO NFTs
 - **Slippage protection** for swaps and liquidity
 - **Reentrancy guards** on all critical functions
-- **Emergency withdraw** mechanisms
-- **Epoch-aligned** voting with Aerodrome
+- **Emergency withdraw** with Autopilot retry mechanisms
+- **Epoch-aligned** with automatic locking deadline
+- **Paginated view functions** for gas efficiency
 
 ## Installation
 
@@ -210,11 +213,11 @@ Replace `https://sepolia.base.org` with `https://mainnet.base.org`
 
 | Contract | Address | Basescan |
 |----------|---------|----------|
-| **KickoffFactory** | `0x9E60d5A1D9E4522eaB7C4c5De3E9f44b82f2A101` | [View](https://basescan.org/address/0x9E60d5A1D9E4522eaB7C4c5De3E9f44b82f2A101) |
-| **LPLocker** | `0x22F9cA52913cf9Be81b3934996Cb95e38B31eaFA` | [View](https://basescan.org/address/0x22F9cA52913cf9Be81b3934996Cb95e38B31eaFA) |
-| **KickoffPoolReader** | `0xe8975e19371d02b810105322b08310E444Fd89EC` | [View](https://basescan.org/address/0xe8975e19371d02b810105322b08310E444Fd89EC) |
-| **TokenVesting** | `0xDb09c6A56dDB65D2a86F14b33e6650161D5fe8E8` | [View](https://basescan.org/address/0xDb09c6A56dDB65D2a86F14b33e6650161D5fe8E8) |
-| **ProjectTokenFactory** | `0x4bAB0EF9411C3BD63Ea4FD5e13D5ABA416C6596F` | [View](https://basescan.org/address/0x4bAB0EF9411C3BD63Ea4FD5e13D5ABA416C6596F) |
+| **KickoffFactory** | `TBD` | TBD |
+| **LPLocker** | `TBD` | TBD |
+| **KickoffPoolReader** | `TBD` | TBD |
+| **TokenVesting** | `TBD` | TBD |
+| **ProjectTokenFactory** | `TBD` | TBD |
 
 ## Usage
 
@@ -295,40 +298,48 @@ ITokenVesting.LockInfo[] memory userLocks = vesting.getUserLocksInfo(userAddress
 uint256 claimable = vesting.getClaimable(lockId);
 ```
 
-### Vote-Sale
+### Vote-Sale (with Autopilot Integration)
 
 #### For Admins (Project Creators)
 
 ```solidity
 // 1. Create Pool (onlyOwner on factory)
+// Note: minVotingPower must be >= 400 veAERO for Autopilot compatibility
 factory.createPool(projectToken, projectOwner, totalAllocation, minVotingPower, poolAdmin)
 
 // 2. Activate Pool
 pool.activate()
+// Note: lockingDeadline is automatically set to 90 min before epoch end
 
-// 3. Cast Votes (after veAERO holders lock)
-pool.castVotes(gaugeAddress)
-// Or batch voting for many NFTs:
-pool.castVotesBatch(gaugeAddress, batchSize)
+// 3. Wait for epoch end + special window to pass (~2h after epoch end)
 
-// 4. Finalize (after epoch ends)
-pool.finalizeEpoch()
-// Or batch finalization for many NFTs:
-pool.startClaimRewardsBatch(batchSize)
-pool.continueClaimRewardsBatch(batchSize)  // repeat until done
-pool.completeFinalization()
+// 4. Finalize with Autopilot flow
+pool.startClaimRewardsFromAutopilot(batchSize)
+pool.continueClaimRewardsFromAutopilot(batchSize)  // repeat until done
+pool.convertUSDCtoWETH()
+pool.completeAutopilotFinalization()
+
+// Emergency functions (if needed)
+pool.emergencyWithdrawNFT(tokenId)           // Withdraw single NFT
+pool.emergencyWithdrawBatch(batchSize)       // Batch withdraw
+pool.retryAutopilotWithdraw(tokenIds)        // Retry failed Autopilot withdrawals
+pool.cancelPool()                            // Cancel and return project tokens
 ```
 
 #### For veAERO Holders
 
 ```solidity
-// 1. Lock veAERO (must have no unclaimed rewards from previous epoch)
+// 1. Lock veAERO (must have >= 400 veAERO voting power)
+// WARNING: NFT will be permanently locked in Autopilot (4-year max lock)
 veAERO.approve(poolAddress, tokenId)
-pool.lockVeAERO(tokenId)
+pool.lockVeAERO(tokenId)  // Auto-deposits to Autopilot
 
-// 2. Unlock & Claim (after finalization)
-pool.unlockVeAERO(tokenId)
-pool.claimProjectTokens()
+// 2. Unlock NFT & Claim (after pool is Completed)
+pool.unlockVeAERO(tokenId)  // Auto-withdraws from Autopilot and returns NFT
+pool.claimProjectTokens()   // Claim project tokens
+
+// If NFT stuck after emergency withdraw:
+pool.claimUnlockedNFT(tokenId)  // Claim NFT after owner's retryAutopilotWithdraw()
 ```
 
 #### Using KickoffPoolReader (View Functions)
@@ -336,21 +347,87 @@ pool.claimProjectTokens()
 ```solidity
 KickoffPoolReader reader = KickoffPoolReader(readerAddress);
 
-// Get pool info
-uint256 lockedCount = reader.getLockedNFTCount(pool);
-uint256[] memory tokenIds = reader.getLockedTokenIds(pool);
-(address owner, uint256 vp, bool unlocked) = reader.getLockedNFTInfo(pool, tokenId);
+// Get pool stats
+(uint256 totalVotingPower, uint256 participantCount, uint256 nftCount, uint256 saleAllocation) 
+    = reader.getPoolStats(pool);
 
-// Get rewards info
-(address[] memory feesTokens, address[] memory bribeTokens) = reader.getAvailableRewardTokens(pool);
-(uint256[] memory feesEarned, uint256[] memory bribesEarned) = reader.getPendingRewards(pool, tokenId, rewardTokens);
+// Get locked NFT info
+(address owner, uint256 vp, bool unlocked, bool inAutopilot) 
+    = reader.getLockedNFTInfo(pool, tokenId);
+
+// Get paginated NFT list with Autopilot status
+(uint256[] memory tokenIds, bool[] memory inAutopilot, uint256 totalCount) 
+    = reader.getLockedNFTsWithStatusPaginated(pool, startIndex, limit);
+
+// Get multiple NFT infos at once
+(address[] memory owners, uint256[] memory votingPowers, bool[] memory unlockeds, bool[] memory inAutopilots) 
+    = reader.getMultipleNFTInfos(pool, tokenIds);
+
+// Get Autopilot pending rewards (paginated)
+(uint256 totalPending, uint256 processedCount, uint256 totalCount) 
+    = reader.getTotalAutopilotPendingRewardsPaginated(pool, startIndex, limit);
 
 // Get claimable project tokens
 uint256 claimable = reader.getClaimableTokens(pool, userAddress);
 
-// Get progress
-(uint256 processed, uint256 total, bool inProgress) = reader.getVotingProgress(pool);
-(uint256 processed, uint256 total, bool inProgress) = reader.getFinalizeProgress(pool);
+// Get Autopilot rewards token (USDC)
+address rewardsToken = reader.getAutopilotRewardsToken();
+```
+
+## Autopilot Integration
+
+**IMPORTANT**: The Vote-Sale pool is integrated with [Autopilot Protocol](https://autopilot-5.gitbook.io/autopilot/) for automated vAPR optimization.
+
+### How It Works
+
+1. **When you lock veAERO**: Your NFT is automatically deposited to Autopilot
+2. **Autopilot handles voting**: Autopilot bots vote for optimal gauges to maximize vAPR
+3. **Rewards in USDC**: Autopilot claims and converts all rewards to USDC
+4. **Finalization**: Admin claims USDC from Autopilot, converts to WETH, adds liquidity
+5. **NFT withdrawal**: Users can withdraw their NFTs after pool completion
+
+
+### Autopilot Integrated Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  User locks veNFT → Deposited to Autopilot (permanent lock)      │
+│                              ↓                                    │
+│  Autopilot bots vote for optimal gauges → Best vAPR              │
+│                              ↓                                    │
+│  Admin claims USDC from Autopilot (batch)                         │
+│                              ↓                                    │
+│  Swap USDC → WETH → Add liquidity → Lock LP                       │
+│                              ↓                                    │
+│  Users call unlockVeAERO() → Auto-withdraws from Autopilot        │
+│                              ↓                                    │
+│  Users claim project tokens                                       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Autopilot Contract
+
+| Contract | Address |
+|----------|---------|
+| Autopilot PermanentLocksPoolV1 | `0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4` |
+| USDC (Rewards Token) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+
+### Admin Functions (Autopilot Flow)
+
+```solidity
+// After epoch ends and special window passes:
+pool.startClaimRewardsFromAutopilot(batchSize);
+pool.continueClaimRewardsFromAutopilot(batchSize);  // repeat until done
+pool.convertUSDCtoWETH();
+pool.completeAutopilotFinalization();
+```
+
+### User Functions (Autopilot Flow)
+
+```solidity
+// After pool is Completed:
+pool.unlockVeAERO(tokenId);  // Auto-withdraws from Autopilot and returns NFT
+pool.claimProjectTokens();   // Claim your project tokens
 ```
 
 ## Aerodrome Integration
@@ -377,10 +454,14 @@ Contracts integrate with Aerodrome on Base:
 - **Emergency rescue** for stuck tokens
 - **Slippage protection** for swaps and liquidity
 - **Batch processing** to avoid gas limits
-- **Deactivated NFT handling** (FIND-002) - gracefully skips deactivated veAERO
-- **Epoch alignment** (FIND-004/012) - ensures voting within Aerodrome epoch boundaries
-- **Pool cancellation** (FIND-007/020) - allows recovery if no participants
-- **Pull-based fee distribution** (FIND-018) - prevents DoS on LPLocker
+- **Safe ERC20 transfers** - handles non-standard tokens (USDT, etc.)
+- **Deactivated NFT handling** - gracefully skips deactivated veAERO
+- **Epoch alignment** - ensures operations within Aerodrome epoch boundaries
+- **Pool cancellation** - allows recovery if no participants
+- **Pull-based fee distribution** - prevents DoS on LPLocker
+- **LPLocker deployer check** - only deployer can set factory
+- **Paginated view functions** - prevents gas DoS on large datasets
+- **Autopilot retry mechanism** - handles stuck NFTs during special window
 
 ## License
 
