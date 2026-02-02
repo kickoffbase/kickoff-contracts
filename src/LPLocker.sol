@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IPool} from "./interfaces/IPool.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
-
-/// @notice Interface for Aerodrome PoolFactory
-interface IPoolFactory {
-    function isPool(address pool) external view returns (bool);
-}
+import {INonfungiblePositionManager} from "./interfaces/INonfungiblePositionManager.sol";
+import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
 
 /// @notice Interface for KickoffFactory
 interface IKickoffFactory {
@@ -15,9 +11,9 @@ interface IKickoffFactory {
 }
 
 /// @title LPLocker
-/// @notice Permanent LP lock with trading fees distribution (30% Admin / 70% Project Owner)
-/// @dev LP tokens are locked forever, only trading fees can be claimed
-contract LPLocker {
+/// @notice Permanent CL Position lock with trading fees distribution (30% Admin / 70% Project Owner)
+/// @dev Stores Aerodrome Slipstream NFT positions permanently, only trading fees can be claimed
+contract LPLocker is IERC721Receiver {
     /*//////////////////////////////////////////////////////////////
                             REENTRANCY GUARD
     //////////////////////////////////////////////////////////////*/
@@ -44,22 +40,22 @@ contract LPLocker {
     error AlreadyLocked();
     error TransferFailed();
     error ReentrancyGuardReentrantCall();
-    error InvalidPool();
     error FactoryAlreadySet();
     error FactoryNotSet();
     error NotVoteSalePool();
     error NotDeployer();
+    error InvalidPosition();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event LPLocked(
+    event PositionLocked(
         address indexed votePool,
-        address indexed lpToken,
+        uint256 indexed positionId,
         address admin,
         address projectOwner,
-        uint256 amount
+        uint128 liquidity
     );
 
     event TradingFeesClaimed(
@@ -89,17 +85,18 @@ contract LPLocker {
                                  STRUCTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Info about locked LP for a vote pool
-    struct LockedLP {
-        address lpToken; // Aerodrome LP token address
-        address aerodromePool; // Aerodrome Pool contract (for claimFees)
-        address admin; // Receives 30% of trading fees
-        address projectOwner; // Receives 70% of trading fees
-        uint256 totalLP; // Total LP locked (forever)
-        bool exists; // Whether this pool exists
+    /// @notice Info about locked CL position for a vote pool
+    struct LockedPosition {
+        uint256 positionId;      // Slipstream NFT position ID
+        address token0;          // First token of the pair
+        address token1;          // Second token of the pair
+        address admin;           // Receives 30% of trading fees
+        address projectOwner;    // Receives 70% of trading fees
+        uint128 liquidity;       // Position liquidity (for reference)
+        bool exists;             // Whether this pool exists
     }
     
-    /// @notice Accrued fees for pull-based withdrawal (#18)
+    /// @notice Accrued fees for pull-based withdrawal
     struct AccruedFees {
         uint256 adminBalance;
         uint256 projectBalance;
@@ -109,14 +106,14 @@ contract LPLocker {
                                  STATE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Aerodrome PoolFactory address on Base mainnet
-    address public constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+    /// @notice Aerodrome Slipstream NonfungiblePositionManager on Base mainnet
+    INonfungiblePositionManager public constant positionManager = 
+        INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
 
     /// @notice Deployer address (for setFactory access control)
     address public immutable deployer;
 
     /// @notice KickoffFactory address (set once after deployment)
-    /// @dev Only pools created by KickoffFactory can call lockLP()
     address public kickoffFactory;
 
     /// @notice Fee split for admin (30%)
@@ -128,14 +125,13 @@ contract LPLocker {
     /// @notice Basis points denominator
     uint256 public constant BPS_DENOMINATOR = 10000;
 
-    /// @notice Mapping from vote pool address to locked LP info
-    mapping(address => LockedLP) public lockedPools;
+    /// @notice Mapping from vote pool address to locked position info
+    mapping(address => LockedPosition) public lockedPools;
 
-    /// @notice Array of all vote pools with locked LP
+    /// @notice Array of all vote pools with locked positions
     address[] public allVotePools;
     
-    /// @notice #18: Accrued fees per votePool per token (pull-based)
-    /// @dev votePool => token => AccruedFees
+    /// @notice Accrued fees per votePool per token (pull-based)
     mapping(address => mapping(address => AccruedFees)) public accruedFees;
 
     /*//////////////////////////////////////////////////////////////
@@ -147,11 +143,19 @@ contract LPLocker {
     }
 
     /*//////////////////////////////////////////////////////////////
+                           ERC721 RECEIVER
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Handle receipt of NFT positions
+    function onERC721Received(address, address, uint256, bytes calldata) external pure override returns (bytes4) {
+        return this.onERC721Received.selector;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                             FACTORY SETUP
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Set the KickoffFactory address (can only be called once by deployer)
-    /// @param _factory The KickoffFactory address
     function setFactory(address _factory) external {
         if (msg.sender != deployer) revert NotDeployer();
         if (_factory == address(0)) revert ZeroAddress();
@@ -163,19 +167,15 @@ contract LPLocker {
                             LOCK FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Lock LP tokens permanently
-    /// @dev Only callable by KickoffVoteSalePool contracts created by KickoffFactory.
-    /// @param lpToken The Aerodrome LP token address
-    /// @param aerodromePool The Aerodrome Pool contract address
+    /// @notice Lock a CL position NFT permanently
+    /// @dev Only callable by KickoffVoteSalePool contracts created by KickoffFactory
+    /// @param positionId The Slipstream NFT position ID to lock
     /// @param admin The admin address (receives 30% fees)
     /// @param projectOwner The project owner address (receives 70% fees)
-    /// @param amount The amount of LP tokens to lock
-    function lockLP(
-        address lpToken,
-        address aerodromePool,
+    function lockPosition(
+        uint256 positionId,
         address admin,
-        address projectOwner,
-        uint256 amount
+        address projectOwner
     ) external {
         // Ensure factory is set
         if (kickoffFactory == address(0)) revert FactoryNotSet();
@@ -183,81 +183,90 @@ contract LPLocker {
         // Only allow calls from KickoffVoteSalePool contracts
         if (!IKickoffFactory(kickoffFactory).isPool(msg.sender)) revert NotVoteSalePool();
         
-        if (lpToken == address(0) || aerodromePool == address(0)) revert ZeroAddress();
         if (admin == address(0) || projectOwner == address(0)) revert ZeroAddress();
-        if (amount == 0) revert ZeroAmount();
         if (lockedPools[msg.sender].exists) revert AlreadyLocked();
         
-        // SECURITY: Validate that aerodromePool is a legitimate Aerodrome pool
-        if (!IPoolFactory(AERODROME_POOL_FACTORY).isPool(aerodromePool)) revert InvalidPool();
+        // Get position info to validate and store token addresses
+        (
+            ,  // nonce
+            ,  // operator
+            address token0,
+            address token1,
+            ,  // tickSpacing
+            ,  // tickLower
+            ,  // tickUpper
+            uint128 liquidity,
+            ,  // feeGrowthInside0LastX128
+            ,  // feeGrowthInside1LastX128
+            ,  // tokensOwed0
+               // tokensOwed1
+        ) = positionManager.positions(positionId);
         
-        // On Aerodrome, LP token address IS the pool contract address
-        if (lpToken != aerodromePool) revert InvalidPool();
+        if (liquidity == 0) revert InvalidPosition();
+        
+        // Transfer NFT position to this contract
+        positionManager.transferFrom(msg.sender, address(this), positionId);
 
-        // Transfer LP tokens to this contract
-        if (!IERC20(lpToken).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
-
-        // Store locked LP info
-        lockedPools[msg.sender] = LockedLP({
-            lpToken: lpToken,
-            aerodromePool: aerodromePool,
+        // Store locked position info
+        lockedPools[msg.sender] = LockedPosition({
+            positionId: positionId,
+            token0: token0,
+            token1: token1,
             admin: admin,
             projectOwner: projectOwner,
-            totalLP: amount,
+            liquidity: liquidity,
             exists: true
         });
 
         allVotePools.push(msg.sender);
 
-        emit LPLocked(msg.sender, lpToken, admin, projectOwner, amount);
+        emit PositionLocked(msg.sender, positionId, admin, projectOwner, liquidity);
     }
 
     /*//////////////////////////////////////////////////////////////
                         CLAIM TRADING FEES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Claim and accrue trading fees from Aerodrome pool
-    /// @dev #18: Pull-based - fees are accrued internally, then withdrawn separately
+    /// @notice Claim and accrue trading fees from CL position
     /// @param votePool The vote pool address
     function claimTradingFees(address votePool) external nonReentrant {
-        LockedLP storage pool = lockedPools[votePool];
+        LockedPosition storage pool = lockedPools[votePool];
 
         if (!pool.exists) revert PoolNotFound();
 
-        // Get token addresses
-        address token0 = IPool(pool.aerodromePool).token0();
-        address token1 = IPool(pool.aerodromePool).token1();
+        // Collect all fees from position
+        INonfungiblePositionManager.CollectParams memory params = INonfungiblePositionManager.CollectParams({
+            tokenId: pool.positionId,
+            recipient: address(this),
+            amount0Max: type(uint128).max,
+            amount1Max: type(uint128).max
+        });
 
-        // Claim fees from Aerodrome pool
-        (uint256 claimed0, uint256 claimed1) = IPool(pool.aerodromePool).claimFees();
+        (uint256 claimed0, uint256 claimed1) = positionManager.collect(params);
 
         // Calculate and accrue shares
         if (claimed0 > 0) {
             uint256 adminShare0 = (claimed0 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
             uint256 projectShare0 = claimed0 - adminShare0;
-            accruedFees[votePool][token0].adminBalance += adminShare0;
-            accruedFees[votePool][token0].projectBalance += projectShare0;
-            emit FeesAccrued(votePool, token0, adminShare0, projectShare0);
+            accruedFees[votePool][pool.token0].adminBalance += adminShare0;
+            accruedFees[votePool][pool.token0].projectBalance += projectShare0;
+            emit FeesAccrued(votePool, pool.token0, adminShare0, projectShare0);
         }
         
         if (claimed1 > 0) {
             uint256 adminShare1 = (claimed1 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
             uint256 projectShare1 = claimed1 - adminShare1;
-            accruedFees[votePool][token1].adminBalance += adminShare1;
-            accruedFees[votePool][token1].projectBalance += projectShare1;
-            emit FeesAccrued(votePool, token1, adminShare1, projectShare1);
+            accruedFees[votePool][pool.token1].adminBalance += adminShare1;
+            accruedFees[votePool][pool.token1].projectBalance += projectShare1;
+            emit FeesAccrued(votePool, pool.token1, adminShare1, projectShare1);
         }
 
-        emit TradingFeesClaimed(votePool, msg.sender, token0, claimed0, token1, claimed1);
+        emit TradingFeesClaimed(votePool, msg.sender, pool.token0, claimed0, pool.token1, claimed1);
     }
     
     /// @notice Withdraw accrued fees for admin
-    /// @dev #18: Pull-based withdrawal to any recipient address
-    /// @param votePool The vote pool address
-    /// @param token The token to withdraw
-    /// @param recipient The address to receive fees
     function withdrawAdminFees(address votePool, address token, address recipient) external nonReentrant {
-        LockedLP storage pool = lockedPools[votePool];
+        LockedPosition storage pool = lockedPools[votePool];
         if (!pool.exists) revert PoolNotFound();
         if (msg.sender != pool.admin) revert NotAuthorized();
         if (recipient == address(0)) revert ZeroAddress();
@@ -272,12 +281,8 @@ contract LPLocker {
     }
     
     /// @notice Withdraw accrued fees for project owner
-    /// @dev #18: Pull-based withdrawal to any recipient address
-    /// @param votePool The vote pool address
-    /// @param token The token to withdraw
-    /// @param recipient The address to receive fees
     function withdrawProjectFees(address votePool, address token, address recipient) external nonReentrant {
-        LockedLP storage pool = lockedPools[votePool];
+        LockedPosition storage pool = lockedPools[votePool];
         if (!pool.exists) revert PoolNotFound();
         if (msg.sender != pool.projectOwner) revert NotAuthorized();
         if (recipient == address(0)) revert ZeroAddress();
@@ -292,7 +297,6 @@ contract LPLocker {
     }
     
     /// @notice Safe transfer helper for non-standard tokens
-    /// @dev #15: Handles tokens that don't return bool on transfer
     function _safeTransfer(address token, address to, uint256 amount) internal {
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
@@ -306,7 +310,7 @@ contract LPLocker {
                           VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Get pending trading fees for a vote pool (not yet claimed from Aerodrome)
+    /// @notice Get pending trading fees for a vote pool (in position, not yet collected)
     /// @param votePool The vote pool address
     /// @return token0 The first token address
     /// @return amount0 Pending amount of token0
@@ -317,27 +321,30 @@ contract LPLocker {
         view
         returns (address token0, uint256 amount0, address token1, uint256 amount1)
     {
-        LockedLP storage pool = lockedPools[votePool];
+        LockedPosition storage pool = lockedPools[votePool];
 
         if (!pool.exists) {
             return (address(0), 0, address(0), 0);
         }
 
-        token0 = IPool(pool.aerodromePool).token0();
-        token1 = IPool(pool.aerodromePool).token1();
+        token0 = pool.token0;
+        token1 = pool.token1;
 
-        // Get claimable fees (this is a view approximation)
-        // Note: Actual claimable amounts may differ slightly
-        amount0 = IPool(pool.aerodromePool).claimable0(address(this));
-        amount1 = IPool(pool.aerodromePool).claimable1(address(this));
+        // Get owed fees from position
+        (
+            ,,,,,,,
+            ,  // liquidity
+            ,  // feeGrowthInside0LastX128
+            ,  // feeGrowthInside1LastX128
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        ) = positionManager.positions(pool.positionId);
+        
+        amount0 = tokensOwed0;
+        amount1 = tokensOwed1;
     }
     
-    /// @notice Get accrued (already claimed, awaiting withdrawal) fees for a vote pool
-    /// @dev #18: Shows fees that have been claimed from Aerodrome but not yet withdrawn
-    /// @param votePool The vote pool address
-    /// @param token The token address to check
-    /// @return adminBalance Accrued balance for admin
-    /// @return projectBalance Accrued balance for project owner
+    /// @notice Get accrued (already collected, awaiting withdrawal) fees for a vote pool
     function getAccruedFees(address votePool, address token) 
         external 
         view 
@@ -347,49 +354,66 @@ contract LPLocker {
         return (fees.adminBalance, fees.projectBalance);
     }
 
-    /// @notice Get fee shares for admin and project owner
-    /// @param votePool The vote pool address
-    /// @return adminShare0 Admin's share of token0
-    /// @return adminShare1 Admin's share of token1
-    /// @return projectShare0 Project owner's share of token0
-    /// @return projectShare1 Project owner's share of token1
+    /// @notice Get fee shares for admin and project owner from pending fees
     function getPendingShares(address votePool)
         external
         view
         returns (uint256 adminShare0, uint256 adminShare1, uint256 projectShare0, uint256 projectShare1)
     {
-        LockedLP storage pool = lockedPools[votePool];
+        LockedPosition storage pool = lockedPools[votePool];
 
         if (!pool.exists) {
             return (0, 0, 0, 0);
         }
 
-        uint256 amount0 = IPool(pool.aerodromePool).claimable0(address(this));
-        uint256 amount1 = IPool(pool.aerodromePool).claimable1(address(this));
+        (
+            ,,,,,,,
+            ,
+            ,
+            ,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        ) = positionManager.positions(pool.positionId);
 
-        adminShare0 = (amount0 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
-        adminShare1 = (amount1 * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
-        projectShare0 = amount0 - adminShare0;
-        projectShare1 = amount1 - adminShare1;
+        adminShare0 = (uint256(tokensOwed0) * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
+        adminShare1 = (uint256(tokensOwed1) * ADMIN_FEE_BPS) / BPS_DENOMINATOR;
+        projectShare0 = uint256(tokensOwed0) - adminShare0;
+        projectShare1 = uint256(tokensOwed1) - adminShare1;
     }
 
-    /// @notice Get locked LP info for a vote pool
-    /// @param votePool The vote pool address
-    /// @return info The LockedLP struct
-    function getLockedLP(address votePool) external view returns (LockedLP memory info) {
+    /// @notice Get locked position info for a vote pool
+    function getLockedPosition(address votePool) external view returns (LockedPosition memory info) {
         return lockedPools[votePool];
     }
+    
+    /// @notice Get locked LP info for a vote pool (legacy compatibility)
+    /// @dev Returns a simplified view for backward compatibility
+    function getLockedLP(address votePool) external view returns (
+        address lpToken,
+        address aerodromePool,
+        address admin,
+        address projectOwner,
+        uint256 totalLP,
+        bool exists
+    ) {
+        LockedPosition storage pool = lockedPools[votePool];
+        return (
+            address(positionManager),  // NFT contract as "LP token"
+            address(0),                // No single pool address in CL
+            pool.admin,
+            pool.projectOwner,
+            pool.positionId,           // Position ID as "amount"
+            pool.exists
+        );
+    }
 
-    /// @notice Get all vote pools with locked LP
-    /// @return Array of vote pool addresses
+    /// @notice Get all vote pools with locked positions
     function getAllVotePools() external view returns (address[] memory) {
         return allVotePools;
     }
 
-    /// @notice Get the count of vote pools with locked LP
-    /// @return The count
+    /// @notice Get the count of vote pools with locked positions
     function getVotePoolCount() external view returns (uint256) {
         return allVotePools.length;
     }
 }
-

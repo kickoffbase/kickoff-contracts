@@ -51,6 +51,11 @@ contract Deploy is Script {
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     address constant WETH = 0x4200000000000000000000000000000000000006;
+    
+    // ============ Slipstream (CL) Contracts on Base ============
+    // Used by KickoffVoteSalePool and LPLocker (hardcoded in contracts)
+    address constant CL_POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
+    address constant CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -147,6 +152,10 @@ contract Deploy is Script {
         console.log("  Router:", ROUTER);
         console.log("  WETH:", WETH);
         console.log("");
+        console.log("Configuration (Slipstream CL):");
+        console.log("  PositionManager:", CL_POSITION_MANAGER);
+        console.log("  CL Factory:", CL_FACTORY);
+        console.log("");
         console.log("Owner:", deployer);
         console.log("");
         
@@ -196,11 +205,14 @@ contract Deploy is Script {
  *     --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY -vvvv
  */
 contract DeployVoteSaleOnly is Script {
+    // Aerodrome
     address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     address constant WETH = 0x4200000000000000000000000000000000000006;
+    // Slipstream (hardcoded in contracts)
+    address constant CL_POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -239,9 +251,12 @@ contract DeployVoteSaleOnly is Script {
 /**
  * @title DeployLPLockerOnly
  * @notice Deploy only LPLocker (for manual pool creation)
- * @dev IMPORTANT: After deployment, setFactory() MUST be called by the deployer to enable lockLP().
+ * @dev IMPORTANT: After deployment, setFactory() MUST be called by the deployer to enable lockPosition().
  *      Only the deployer (this script) can call setFactory() due to access control.
- *      Only pools registered in the factory via isPool() can call lockLP().
+ *      Only pools registered in the factory via isPool() can call lockPosition().
+ *      
+ *      LPLocker stores Slipstream CL NFT positions (not ERC20 LP tokens).
+ *      It uses the hardcoded NonfungiblePositionManager at 0x827922686190790b37229fd06084350E74485b72.
  * 
  * Usage:
  *   forge script script/Deploy.s.sol:DeployLPLockerOnly \
@@ -270,8 +285,11 @@ contract DeployLPLockerOnly is Script {
         console.log("LPLocker Deployer:", deployer);
         console.log("");
         console.log("IMPORTANT: Only the deployer can call setFactory()!");
-        console.log("Call locker.setFactory(factoryAddress) from the same wallet to enable lockLP().");
-        console.log("Only pools registered via factory.isPool() can lock LP tokens.");
+        console.log("Call locker.setFactory(factoryAddress) from the same wallet to enable lockPosition().");
+        console.log("Only pools registered via factory.isPool() can lock CL positions.");
+        console.log("");
+        console.log("LPLocker uses Slipstream NonfungiblePositionManager at:");
+        console.log("  0x827922686190790b37229fd06084350E74485b72");
     }
 }
 
@@ -359,11 +377,14 @@ contract DeployTokenFactoryOnly is Script {
  *     --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY -vvvv
  */
 contract DeployWithSalt is Script {
+    // Aerodrome
     address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     address constant WETH = 0x4200000000000000000000000000000000000006;
+    // Slipstream (hardcoded in contracts)
+    address constant CL_POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");

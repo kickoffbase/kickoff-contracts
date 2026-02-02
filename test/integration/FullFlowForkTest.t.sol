@@ -12,6 +12,7 @@ import {IRouter} from "../../src/interfaces/IRouter.sol";
 import {IPool} from "../../src/interfaces/IPool.sol";
 import {IAutopilot} from "../../src/interfaces/IAutopilot.sol";
 import {IERC20} from "../../src/interfaces/IERC20.sol";
+import {INonfungiblePositionManager} from "../../src/interfaces/INonfungiblePositionManager.sol";
 
 /// @title FullFlowForkTest
 /// @notice Complete integration test on Base mainnet fork with 5 real veNFT holders
@@ -28,8 +29,14 @@ contract FullFlowForkTest is Test {
     // ============ AUTOPILOT CONTRACT ============
     address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     
+    // ============ SLIPSTREAM (CL) CONTRACTS ============
+    address constant CL_SWAP_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5;
+    address constant CL_POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
+    address constant CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+    
     // ============ Minimum VP for Autopilot ============
-    uint256 constant MIN_VP = 400e18;
+    // Note: Autopilot's minimum_lock_amount is dynamic, currently 1000 veAERO
+    uint256 constant MIN_VP = 1000e18;
     
     // ============ Known veNFT IDs with high voting power ============
     // These are real NFTs on Base mainnet with significant voting power
@@ -162,6 +169,30 @@ contract FullFlowForkTest is Test {
         
         vm.warp(nextEpochStart + 1 hours); // 1 hour after epoch start
         vm.roll(block.number + 1800); // ~1 hour of blocks
+        
+        // Mock Autopilot epoch info to ensure lockingDeadline is in the future
+        // The real Autopilot's last_snapshot_id might not update immediately after epoch flip
+        uint256 mockEpochId = 999;
+        uint256 wrapperEndsAt = block.timestamp + 6 days; // Well into the future
+        uint256 nextEpochStartsAt = block.timestamp + 7 days;
+        
+        vm.mockCall(
+            AUTOPILOT,
+            abi.encodeWithSignature("last_snapshot_id()"),
+            abi.encode(mockEpochId)
+        );
+        
+        vm.mockCall(
+            AUTOPILOT,
+            abi.encodeWithSelector(bytes4(keccak256("getEpochInfo(uint256)")), mockEpochId),
+            abi.encode(block.timestamp - 1 hours, block.timestamp + 7 days - 1, wrapperEndsAt - 2 hours, wrapperEndsAt)
+        );
+        
+        vm.mockCall(
+            AUTOPILOT,
+            abi.encodeWithSelector(bytes4(keccak256("getEpochInfo(uint256)")), mockEpochId + 1),
+            abi.encode(nextEpochStartsAt, nextEpochStartsAt + 7 days, nextEpochStartsAt + 7 days - 2 hours, nextEpochStartsAt + 7 days)
+        );
         
         vm.prank(admin);
         pool.activate();
@@ -329,7 +360,7 @@ contract FullFlowForkTest is Test {
         console.log("");
         console.log("FINALIZATION COMPLETE:");
         console.log("  WETH Collected:", pool.wethCollected() / 1e18, "WETH");
-        console.log("  LP Created:", pool.lpCreated() / 1e18, "LP");
+        console.log("  LP Position ID:", pool.lpPositionId());
         console.log("  LP Token:", pool.lpToken());
         console.log("  State: COMPLETED");
         console.log("");
@@ -389,12 +420,12 @@ contract FullFlowForkTest is Test {
     }
 
     function _phase7_RealTrading() internal {
-        console.log("PHASE 7: REAL TRADING ON LP POOL");
-        console.log("---------------------------------");
+        console.log("PHASE 7: REAL TRADING ON SLIPSTREAM CL POOL");
+        console.log("--------------------------------------------");
         
-        address lpToken = pool.lpToken();
-        if (lpToken == address(0)) {
-            console.log("No LP created, skipping trading phase");
+        uint256 positionId = pool.lpPositionId();
+        if (positionId == 0) {
+            console.log("No CL position created, skipping trading phase");
             console.log("");
             return;
         }
@@ -404,52 +435,73 @@ contract FullFlowForkTest is Test {
         
         console.log("Trader WETH balance:", IERC20(WETH).balanceOf(trader) / 1e18, "WETH");
         
-        // Routes for trading
-        IRouter.Route[] memory routeToToken = new IRouter.Route[](1);
-        routeToToken[0] = IRouter.Route({
-            from: WETH,
-            to: address(projectToken),
-            stable: false,
-            factory: router.defaultFactory()
-        });
+        // Get pool address from CL factory
+        // Sort tokens for CL (token0 < token1)
+        (address token0, address token1) = address(projectToken) < WETH 
+            ? (address(projectToken), WETH) 
+            : (WETH, address(projectToken));
         
-        IRouter.Route[] memory routeToWeth = new IRouter.Route[](1);
-        routeToWeth[0] = IRouter.Route({
-            from: address(projectToken),
-            to: WETH,
-            stable: false,
-            factory: router.defaultFactory()
-        });
+        // Slipstream SwapRouter interface
+        ISlipstreamSwapRouter swapRouter = ISlipstreamSwapRouter(CL_SWAP_ROUTER);
         
         uint256 totalVolume = 0;
         
         // Execute 10 swaps to generate trading fees
-        console.log("Executing 10 swap rounds...");
+        console.log("Executing 10 swap rounds on Slipstream...");
         
         for (uint256 i = 0; i < 10; i++) {
             vm.startPrank(trader);
             
             // Swap WETH -> TKICK
             uint256 wethIn = 0.5 ether;
-            IERC20(WETH).approve(ROUTER, wethIn);
+            IERC20(WETH).approve(CL_SWAP_ROUTER, wethIn);
             
-            try router.swapExactTokensForTokens(wethIn, 0, routeToToken, trader, block.timestamp + 60) 
-            returns (uint256[] memory amounts) {
+            ISlipstreamSwapRouter.ExactInputSingleParams memory paramsIn = ISlipstreamSwapRouter.ExactInputSingleParams({
+                tokenIn: WETH,
+                tokenOut: address(projectToken),
+                tickSpacing: 200, // 1% fee tier
+                recipient: trader,
+                deadline: block.timestamp + 60,
+                amountIn: wethIn,
+                amountOutMinimum: 0,
+                sqrtPriceLimitX96: 0
+            });
+            
+            try swapRouter.exactInputSingle(paramsIn) returns (uint256 amountOut) {
                 totalVolume += wethIn;
+                console.log("  Swap round completed - WETH in:", wethIn / 1e18);
+                console.log("    TKICK out:", amountOut / 1e18);
                 
-                // Swap some back: TKICK -> WETH
-                uint256 tokenBack = amounts[1] / 2;
-                projectToken.approve(ROUTER, tokenBack);
+                // Swap half back: TKICK -> WETH
+                uint256 tokenBack = amountOut / 2;
+                projectToken.approve(CL_SWAP_ROUTER, tokenBack);
                 
-                try router.swapExactTokensForTokens(tokenBack, 0, routeToWeth, trader, block.timestamp + 60)
-                returns (uint256[] memory) {
+                ISlipstreamSwapRouter.ExactInputSingleParams memory paramsOut = ISlipstreamSwapRouter.ExactInputSingleParams({
+                    tokenIn: address(projectToken),
+                    tokenOut: WETH,
+                    tickSpacing: 200,
+                    recipient: trader,
+                    deadline: block.timestamp + 60,
+                    amountIn: tokenBack,
+                    amountOutMinimum: 0,
+                    sqrtPriceLimitX96: 0
+                });
+                
+                try swapRouter.exactInputSingle(paramsOut) returns (uint256 wethBack) {
                     totalVolume += tokenBack;
-                } catch {}
-            } catch {}
+                    console.log("    Swapped back TKICK:", tokenBack / 1e18);
+                    console.log("    WETH received:", wethBack / 1e18);
+                } catch {
+                    console.log("    Swap back failed");
+                }
+            } catch {
+                console.log("  Swap round failed");
+            }
             
             vm.stopPrank();
         }
         
+        console.log("");
         console.log("Trading volume:", totalVolume / 1e18);
         console.log("Trader final TKICK:", projectToken.balanceOf(trader) / 1e18);
         console.log("Trader final WETH:", IERC20(WETH).balanceOf(trader) / 1e18);
@@ -457,30 +509,36 @@ contract FullFlowForkTest is Test {
     }
 
     function _phase8_ClaimTradingFees() internal {
-        console.log("PHASE 8: CLAIM TRADING FEES");
-        console.log("----------------------------");
+        console.log("PHASE 8: CLAIM TRADING FEES FROM CL POSITION");
+        console.log("----------------------------------------------");
         
-        address lpToken = pool.lpToken();
-        if (lpToken == address(0)) {
-            console.log("No LP, skipping fee claims");
+        uint256 positionId = pool.lpPositionId();
+        if (positionId == 0) {
+            console.log("No CL position, skipping fee claims");
             console.log("");
             return;
         }
         
-        IPool lpPool = IPool(lpToken);
+        // Get position info
+        LPLocker.LockedPosition memory pos = lpLocker.getLockedPosition(address(pool));
+        address token0 = pos.token0;
+        address token1 = pos.token1;
         
-        // Check pending fees
-        (address token0, uint256 pending0, address token1, uint256 pending1) = lpLocker.pendingFees(address(pool));
+        console.log("CL Position ID:", positionId);
+        console.log("Token0:", token0);
+        console.log("Token1:", token1);
         
-        console.log("Pending fees in Aerodrome pool:");
-        console.log("  Token0:", token0);
-        console.log("  Pending0:", pending0);
-        console.log("  Token1:", token1);
-        console.log("  Pending1:", pending1);
+        // Check pending fees from position
+        (address t0, uint256 pending0, address t1, uint256 pending1) = lpLocker.pendingFees(address(pool));
         
-        // Claim fees (this accrues to LPLocker)
         console.log("");
-        console.log("Claiming trading fees...");
+        console.log("Pending fees in CL position:");
+        console.log("  Token0 pending:", pending0);
+        console.log("  Token1 pending:", pending1);
+        
+        // Claim fees (this collects from position and accrues to LPLocker)
+        console.log("");
+        console.log("Claiming trading fees from position...");
         
         lpLocker.claimTradingFees(address(pool));
         
@@ -488,6 +546,7 @@ contract FullFlowForkTest is Test {
         (uint256 adminToken0, uint256 projToken0) = lpLocker.getAccruedFees(address(pool), token0);
         (uint256 adminToken1, uint256 projToken1) = lpLocker.getAccruedFees(address(pool), token1);
         
+        console.log("");
         console.log("Accrued fees after claim:");
         console.log("  Admin Token0:", adminToken0);
         console.log("  Project Token0:", projToken0);
@@ -545,7 +604,7 @@ contract FullFlowForkTest is Test {
         
         console.log("POOL RESULTS:");
         console.log("  WETH Collected:", pool.wethCollected() / 1e18, "WETH");
-        console.log("  LP Created:", pool.lpCreated() / 1e18, "LP");
+        console.log("  LP Position ID:", pool.lpPositionId());
         console.log("  LP Token:", pool.lpToken());
         console.log("");
         
@@ -555,10 +614,11 @@ contract FullFlowForkTest is Test {
         console.log("  Claims Count:", pool.claimCount());
         console.log("");
         
-        if (pool.lpToken() != address(0)) {
-            LPLocker.LockedLP memory lp = lpLocker.getLockedLP(address(pool));
-            console.log("LP LOCK:");
-            console.log("  Permanently Locked:", lp.totalLP / 1e18, "LP");
+        if (pool.lpPositionId() != 0) {
+            LPLocker.LockedPosition memory lp = lpLocker.getLockedPosition(address(pool));
+            console.log("CL POSITION LOCK:");
+            console.log("  Position ID:", lp.positionId);
+            console.log("  Liquidity:", lp.liquidity);
             console.log("  Admin (30% fees):", lp.admin);
             console.log("  Project Owner (70% fees):", lp.projectOwner);
             console.log("");
@@ -770,4 +830,20 @@ contract MockProjectToken is IERC20 {
         emit Transfer(from, to, amount);
         return true;
     }
+}
+
+/// @notice Interface for Slipstream (CL) SwapRouter
+interface ISlipstreamSwapRouter {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        int24 tickSpacing;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
 }

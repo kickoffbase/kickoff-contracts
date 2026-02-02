@@ -11,6 +11,7 @@ import {MockVotingEscrow} from "./mocks/MockVotingEscrow.sol";
 import {MockVoter} from "./mocks/MockVoter.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 import {MockAutopilot} from "./mocks/MockAutopilot.sol";
+import {MockNonfungiblePositionManager} from "./mocks/MockNonfungiblePositionManager.sol";
 
 contract KickoffVoteSalePoolTest is Test {
     KickoffFactory public factory;
@@ -40,6 +41,7 @@ contract KickoffVoteSalePoolTest is Test {
     address constant AUTOPILOT_ADDRESS = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant USDC_ADDRESS = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+    address constant SLIPSTREAM_POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
 
     address constant AUTOPILOT_DEPOSIT_VALIDATOR = address(0x999);
     
@@ -91,6 +93,15 @@ contract KickoffVoteSalePoolTest is Test {
             abi.encodeWithSignature("isPool(address)"),
             abi.encode(true)
         );
+        
+        // Deploy mock Slipstream position manager at hardcoded address
+        MockNonfungiblePositionManager mockPositionManager = new MockNonfungiblePositionManager(address(0));
+        vm.etch(SLIPSTREAM_POSITION_MANAGER, address(mockPositionManager).code);
+        
+        // Set nextTokenId to 1 in storage (slot 1 in MockNonfungiblePositionManager)
+        // nextTokenId is the 3rd storage variable, after _positions (slot 0) and getApproved (slot 1)
+        // Actually nextTokenId is declared after those mappings, so it's at slot 2
+        vm.store(SLIPSTREAM_POSITION_MANAGER, bytes32(uint256(2)), bytes32(uint256(1)));
 
         // Setup voter mock
         voter.setGauge(mockPool, mockGauge);
@@ -388,7 +399,7 @@ contract KickoffVoteSalePoolTest is Test {
         vm.stopPrank();
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
-        assertTrue(pool.lpCreated() > 0);
+        assertTrue(pool.lpPositionId() > 0);
     }
 
     /*//////////////////////////////////////////////////////////////

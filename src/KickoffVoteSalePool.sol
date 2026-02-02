@@ -10,6 +10,8 @@ import {IERC20} from "./interfaces/IERC20.sol";
 import {IWETH} from "./interfaces/IWETH.sol";
 import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
 import {IAutopilot} from "./interfaces/IAutopilot.sol";
+import {INonfungiblePositionManager} from "./interfaces/INonfungiblePositionManager.sol";
+import {ICLFactory} from "./interfaces/ICLFactory.sol";
 
 /// @title KickoffVoteSalePool
 /// @notice Vote-Sale pool for veAERO holders to participate in project launches
@@ -74,7 +76,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     event VeAEROLocked(address indexed user, uint256 indexed tokenId, uint256 votingPower);
     event VeAEROUnlocked(address indexed user, uint256 indexed tokenId);
-    event EpochFinalized(uint256 wethCollected, uint256 lpCreated);
+    event EpochFinalized(uint256 wethCollected, uint256 lpPositionId);
     event ProjectTokensClaimed(address indexed user, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed tokenId);
     event TokensRescued(address indexed token, address indexed to, uint256 amount);
@@ -187,8 +189,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice WETH balance before finalization started (for accurate reward tracking)
     uint256 private wethBeforeFinalization;
 
-    /// @notice Total LP created
-    uint256 public lpCreated;
+    /// @notice CL Position ID created (Slipstream NFT)
+    uint256 public lpPositionId;
     
     /// @notice Total project tokens claimed (for dust tracking - #13)
     uint256 public totalProjectTokensClaimed;
@@ -260,6 +262,24 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Track which NFTs are deposited in Autopilot
     mapping(uint256 => bool) public depositedToAutopilot;
+
+    /*//////////////////////////////////////////////////////////////
+                          SLIPSTREAM (CL) INTEGRATION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Aerodrome Slipstream NonfungiblePositionManager on Base mainnet
+    INonfungiblePositionManager public constant clPositionManager = 
+        INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
+
+    /// @notice Aerodrome Slipstream CL Factory on Base mainnet
+    ICLFactory public constant clFactory = ICLFactory(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A);
+
+    /// @notice Tick spacing for 1% fee tier in Slipstream
+    int24 public constant CL_TICK_SPACING = 200;
+
+    /// @notice Full-range tick bounds for 1% fee tier (rounded to tickSpacing)
+    int24 public constant CL_MIN_TICK = -887200;
+    int24 public constant CL_MAX_TICK = 887200;
 
     /// @notice USDC balance before finalization started (for accurate reward tracking)
     uint256 private usdcBeforeFinalization;
@@ -403,6 +423,13 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Check minimum voting power (factory ensures minVotingPower >= MIN_AUTOPILOT_VOTING_POWER)
         if (votingPowerAmount < minVotingPower) {
             revert VotingPowerTooLow();
+        }
+
+        // Make lock permanent if not already (required for Autopilot deposit)
+        // lock.end == 0 means already permanent
+        (, uint256 lockEnd) = votingEscrow.locked(tokenId);
+        if (lockEnd != 0) {
+            votingEscrow.lockPermanent(tokenId);
         }
 
         // Transfer NFT to this contract
@@ -648,7 +675,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         finalizeStep = FinalizeStep.Completed;
         
         _setState(PoolState.Completed);
-        emit EpochFinalized(wethCollected, lpCreated);
+        emit EpochFinalized(wethCollected, lpPositionId);
     }
 
     /// @notice Get Autopilot claim progress
@@ -700,64 +727,103 @@ contract KickoffVoteSalePool is IERC721Receiver {
         return 0; // #9: Return 0 to signal "skip this swap"
     }
 
-    /// @notice Add liquidity with WETH and project tokens (with slippage protection)
-    /// @dev #6: Handles pre-existing pool gracefully with try-catch
+    /// @notice Add liquidity as Slipstream CL position (1% fee tier, full-range)
+    /// @dev Creates or adds to a CL pool with full-range position for max coverage
     /// @dev #8: Only uses tracked claimed rewards, not external WETH donations
-    /// @dev #19: Handles leftover tokens by adding them to saleAllocation
     function _addLiquidity() internal {
         // #8: Use tracked claimed rewards, not balanceOf (prevents external WETH griefing)
         if (totalClaimedRewards == 0) return;
         
-        // Use tracked amount, not balance
         uint256 wethToUse = totalClaimedRewards;
-
-        address routerAddr = address(router);
         address wethAddr = address(weth);
 
-        // Approve tokens
-        IERC20(projectToken).approve(routerAddr, liquidityAllocation);
-        weth.approve(routerAddr, wethToUse);
+        // Sort tokens (CL requires token0 < token1)
+        (address token0, address token1, uint256 amount0, uint256 amount1) = 
+            projectToken < wethAddr 
+                ? (projectToken, wethAddr, liquidityAllocation, wethToUse)
+                : (wethAddr, projectToken, wethToUse, liquidityAllocation);
+
+        // Approve position manager
+        IERC20(token0).approve(address(clPositionManager), amount0);
+        IERC20(token1).approve(address(clPositionManager), amount1);
+
+        // Calculate sqrtPriceX96 for initial price (token1/token0)
+        // price = amount1 / amount0, sqrtPriceX96 = sqrt(price) * 2^96
+        uint160 sqrtPriceX96 = _calculateSqrtPriceX96(amount0, amount1);
 
         // Calculate minimum amounts with slippage tolerance
-        uint256 minProjectToken = (liquidityAllocation * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
-        uint256 minWeth = (wethToUse * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
+        uint256 amount0Min = (amount0 * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
+        uint256 amount1Min = (amount1 * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
 
-        // #6: Try to add liquidity - handle pre-existing pool with hostile ratios
-        // FIND-006: Use deadline buffer for meaningful deadline protection
-        try router.addLiquidity(
-            projectToken,
-            wethAddr,
-            false, // volatile
-            liquidityAllocation,
-            wethToUse,
-            minProjectToken,
-            minWeth,
-            address(this),
-            block.timestamp + deadlineBuffer
-        ) returns (uint256, uint256, uint256 liquidity) {
-            lpCreated = liquidity;
-            
+        // Mint full-range CL position with 1% fee tier
+        INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
+            token0: token0,
+            token1: token1,
+            tickSpacing: CL_TICK_SPACING,
+            tickLower: CL_MIN_TICK,
+            tickUpper: CL_MAX_TICK,
+            amount0Desired: amount0,
+            amount1Desired: amount1,
+            amount0Min: amount0Min,
+            amount1Min: amount1Min,
+            recipient: address(this),
+            deadline: block.timestamp + deadlineBuffer,
+            sqrtPriceX96: sqrtPriceX96
+        });
+
+        try clPositionManager.mint(params) returns (
+            uint256 tokenId,
+            uint128,  // liquidity
+            uint256,  // amount0Used
+            uint256   // amount1Used
+        ) {
+            lpPositionId = tokenId;
+            // Store LP token as position manager address (for compatibility)
+            lpToken = address(clPositionManager);
             // #19: Any unused tokens stay in contract for distribution via claimDust()
-            
-            // Get LP token address
-            lpToken = router.poolFor(projectToken, wethAddr, false, router.defaultFactory());
         } catch {
-            // #6: Liquidity addition failed (hostile pool ratio)
-            // Tokens stay in contract - admin can try with different slippage or rescue WETH
-            lpCreated = 0;
+            // Liquidity addition failed
+            lpPositionId = 0;
         }
     }
 
-    /// @notice Lock LP tokens in LPLocker
+    /// @notice Calculate sqrtPriceX96 from token amounts
+    /// @dev sqrtPriceX96 = sqrt(amount1/amount0) * 2^96
+    function _calculateSqrtPriceX96(uint256 amount0, uint256 amount1) internal pure returns (uint160) {
+        if (amount0 == 0) return 0;
+        // price = amount1 / amount0
+        // sqrtPriceX96 = sqrt(price) * 2^96
+        // To avoid overflow: sqrt(amount1) * 2^96 / sqrt(amount0)
+        uint256 sqrtAmount1 = _sqrt(amount1);
+        uint256 sqrtAmount0 = _sqrt(amount0);
+        if (sqrtAmount0 == 0) return 0;
+        
+        // sqrtPriceX96 = sqrtAmount1 * 2^96 / sqrtAmount0
+        uint256 result = (sqrtAmount1 << 96) / sqrtAmount0;
+        return uint160(result);
+    }
+
+    /// @notice Babylonian square root
+    function _sqrt(uint256 x) internal pure returns (uint256) {
+        if (x == 0) return 0;
+        uint256 z = (x + 1) / 2;
+        uint256 y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
+        return y;
+    }
+
+    /// @notice Lock CL position in LPLocker
     function _lockLP() internal {
-        if (lpCreated == 0) return;
+        if (lpPositionId == 0) return;
 
-        // Approve LP to locker
-        IERC20(lpToken).approve(address(lpLocker), lpCreated);
+        // Approve position NFT to locker
+        clPositionManager.approve(address(lpLocker), lpPositionId);
 
-        // Lock LP permanently
-        // Note: In Aerodrome, lpToken address IS the pool address (they're the same contract)
-        lpLocker.lockLP(lpToken, lpToken, admin, projectOwner, lpCreated);
+        // Lock position permanently
+        lpLocker.lockPosition(lpPositionId, admin, projectOwner);
     }
 
     /*//////////////////////////////////////////////////////////////

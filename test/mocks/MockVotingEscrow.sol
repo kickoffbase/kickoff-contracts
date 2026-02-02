@@ -119,6 +119,22 @@ contract MockVotingEscrow {
         nfts[tokenId].votingPower = newPower;
     }
 
+    /// @notice Convert a lock to permanent
+    function lockPermanent(uint256 tokenId) external {
+        require(_isApprovedOrOwner(msg.sender, tokenId), "Not approved");
+        nfts[tokenId].lockEnd = 0; // 0 means permanent
+    }
+
+    /// @notice Check if NFT is deactivated (always false in mock)
+    function deactivated(uint256) external pure returns (bool) {
+        return false;
+    }
+
+    /// @notice Check if NFT has voted (always false in mock)
+    function voted(uint256) external pure returns (bool) {
+        return false;
+    }
+
     function _isApprovedOrOwner(address spender, uint256 tokenId) internal view returns (bool) {
         address tokenOwner = nfts[tokenId].owner;
         return spender == tokenOwner || getApproved[tokenId] == spender || isApprovedForAll[tokenOwner][spender];

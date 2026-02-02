@@ -90,5 +90,10 @@ interface IVotingEscrow {
     /// @param tokenId The NFT token ID
     /// @return True if the NFT has the voted flag set
     function voted(uint256 tokenId) external view returns (bool);
+
+    /// @notice Convert a lock to permanent
+    /// @param tokenId The NFT token ID
+    /// @dev Can only be called by the NFT owner or approved address
+    function lockPermanent(uint256 tokenId) external;
 }
 

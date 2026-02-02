@@ -184,7 +184,7 @@ contract RealVeAEROTest is Test {
         vm.stopPrank();
 
         console.log("WETH Collected:", pool.wethCollected() / 1e18, "WETH");
-        console.log("LP Created:", pool.lpCreated() / 1e18, "LP");
+        console.log("LP Position ID:", pool.lpPositionId());
         console.log("LP Token:", pool.lpToken());
         console.log("");
     }
@@ -369,7 +369,7 @@ contract RealVeAEROTest is Test {
         console.log("  WETH from bribes:", pool.wethCollected() / 1e18, "WETH");
         console.log("");
         console.log("Liquidity:");
-        console.log("  LP Tokens:", pool.lpCreated() / 1e18);
+        console.log("  LP Position ID:", pool.lpPositionId());
         console.log("  LP Address:", pool.lpToken());
         console.log("");
         console.log("Token Distribution:");
@@ -377,10 +377,11 @@ contract RealVeAEROTest is Test {
         console.log("  Liquidity (50%):", pool.liquidityAllocation() / 1e18, "KICK");
         console.log("");
         
-        if (pool.lpToken() != address(0)) {
-            LPLocker.LockedLP memory lp = lpLocker.getLockedLP(address(pool));
-            console.log("LP Lock:");
-            console.log("  Locked Forever:", lp.totalLP / 1e18, "LP");
+        if (pool.lpPositionId() != 0) {
+            LPLocker.LockedPosition memory lp = lpLocker.getLockedPosition(address(pool));
+            console.log("CL Position Lock:");
+            console.log("  Position ID:", lp.positionId);
+            console.log("  Liquidity:", lp.liquidity);
             console.log("  Admin (30% fees):", lp.admin);
             console.log("  Project (70% fees):", lp.projectOwner);
         }

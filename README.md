@@ -9,9 +9,9 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 1. **Projects** create tokens with customizable tokenomics via Token Factory
 2. **Projects** deposit tokens and create a Vote-Sale Pool
 3. **veAERO holders** lock their NFTs to provide voting power
-4. **Voting power** is used to vote for the project's gauge on Aerodrome
-5. **Rewards** (bribes + fees) are converted to WETH and paired with project tokens
-6. **LP tokens** are permanently locked, generating trading fees forever
+4. **Autopilot** handles voting for optimal vAPR and converts rewards to USDC
+5. **USDC rewards** are converted to WETH and paired with project tokens
+6. **Slipstream CL Position** (1% fee tier, full-range) is permanently locked, generating trading fees forever
 7. **Participants** claim project tokens proportional to their voting power contribution
 
 ## Architecture
@@ -51,10 +51,11 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
            ▼                                    ▼
 ┌───────────────────────────┐    ┌─────────────────────────────────┐
 │      KickoffPoolReader    │    │           LPLocker              │
-│  - View functions         │    │  - Permanently locks LP tokens  │
-│  - Pool state queries     │    │  - Distributes trading fees     │
-│  - Reward calculations    │    │    (30% admin / 70% project)    │
-└───────────────────────────┘    └─────────────────────────────────┘
+│  - View functions         │    │  - Locks Slipstream CL NFTs     │
+│  - Pool state queries     │    │  - Collects trading fees via    │
+│  - Reward calculations    │    │    positionManager.collect()    │
+└───────────────────────────┘    │  - 30% admin / 70% project      │
+                                 └─────────────────────────────────┘
 ```
 
 ## Contracts
@@ -74,7 +75,7 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 | `KickoffFactory` | Factory for creating Vote-Sale pools |
 | `KickoffVoteSalePool` | Main pool contract for vote-sale mechanism |
 | `KickoffPoolReader` | Read-only contract for pool state queries and reward calculations |
-| `LPLocker` | Permanently locks LP tokens, distributes trading fees |
+| `LPLocker` | Permanently locks Slipstream CL positions, distributes trading fees |
 | `EpochLib` | Library for Aerodrome epoch calculations |
 
 ### Interfaces
@@ -86,6 +87,9 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 | `IVoter` | Aerodrome Voter contract |
 | `IVotingEscrow` | Aerodrome veAERO NFT contract |
 | `IAutopilot` | Autopilot PermanentLocksPoolV1 for vAPR optimization |
+| `INonfungiblePositionManager` | Slipstream CL position manager |
+| `ICLFactory` | Slipstream CL pool factory |
+| `ICLPool` | Slipstream CL pool interface |
 
 ## Features
 
@@ -99,6 +103,7 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 ### Vote-Sale
 - **Autopilot integration** for automated vAPR optimization
 - **USDC rewards** automatically converted to WETH for LP creation
+- **Slipstream CL positions** (1% fee tier, full-range) for liquidity
 - **Batch processing** for 100+ veAERO NFTs
 - **Slippage protection** for swaps and liquidity
 - **Reentrancy guards** on all critical functions
@@ -397,7 +402,9 @@ address rewardsToken = reader.getAutopilotRewardsToken();
 │                              ↓                                    │
 │  Admin claims USDC from Autopilot (batch)                         │
 │                              ↓                                    │
-│  Swap USDC → WETH → Add liquidity → Lock LP                       │
+│  Swap USDC → WETH → Mint Slipstream CL Position (1% fee tier)     │
+│                              ↓                                    │
+│  CL Position locked in LPLocker (trading fees: 30%/70%)           │
 │                              ↓                                    │
 │  Users call unlockVeAERO() → Auto-withdraws from Autopilot        │
 │                              ↓                                    │
@@ -440,6 +447,16 @@ Contracts integrate with Aerodrome on Base:
 | Voter | `0x16613524e02ad97eDfeF371bC883F2F5d6C480A5` |
 | Router | `0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43` |
 | WETH | `0x4200000000000000000000000000000000000006` |
+
+### Slipstream (Concentrated Liquidity)
+
+| Contract | Address |
+|----------|---------|
+| NonfungiblePositionManager | `0x827922686190790b37229fd06084350E74485b72` |
+| CL Factory | `0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A` |
+| Swap Router | `0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5` |
+
+Liquidity is added as **full-range 1% fee tier** CL position for maximum coverage.
 
 ## Security
 
