@@ -67,20 +67,21 @@ contract AutopilotIntegrationTest is Test {
         projectToken.mint(admin, 10_000_000 ether);
 
         // Deploy factory
-        factory = new KickoffFactory(VOTING_ESCROW, VOTER, ROUTER, WETH);
+        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH);
         lpLocker = factory.lpLocker();
 
         // Admin approves tokens
         vm.prank(admin);
         projectToken.approve(address(factory), 10_000_000 ether);
         
-        // Create pool with minVotingPower >= Autopilot minimum (400 veAERO)
+        // Create pool with minVotingPower >= Autopilot's dynamic minimum
+        uint256 minVP = factory.getMinAutopilotVotingPower();
         pool = KickoffVoteSalePool(
             factory.createPool(
                 address(projectToken), 
                 projectOwner, 
                 10_000_000 ether, 
-                MIN_AUTOPILOT_VP, // Must be >= 400 veAERO for Autopilot
+                minVP, // Dynamic minimum from Autopilot
                 admin
             )
         );

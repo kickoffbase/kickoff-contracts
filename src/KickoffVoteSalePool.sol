@@ -66,6 +66,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error NotInAutopilot();
     error StillInAutopilot();
     error InAutopilotSpecialWindow();
+    error UnsafeDepositWindow();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -253,11 +254,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Minimum voting power required for Autopilot deposit (400 veAERO)
     uint256 public constant MIN_AUTOPILOT_VOTING_POWER = 400e18;
 
-    /// @notice Buffer time before epoch end when locking closes (before Autopilot special window)
-    uint256 public constant SPECIAL_WINDOW_BUFFER = 90 minutes;
-
     /// @notice Timestamp when locking closes (auto-transitions to Voting state)
-    /// @dev Set during activate() as epochEnd - SPECIAL_WINDOW_BUFFER
+    /// @dev Set during activate() from Autopilot's wrapperEndsAt (start of unsafe deposit window)
     uint256 public lockingDeadline;
 
     /// @notice Track which NFTs are deposited in Autopilot
@@ -344,15 +342,17 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Activate the pool for the current epoch
     /// @dev Stores both Kickoff epoch and Aerodrome epoch start to ensure alignment
-    /// @dev Sets lockingDeadline to prevent locking during Autopilot special window
+    /// @dev Sets lockingDeadline dynamically from Autopilot's special window
     function activate() external onlyAdmin inState(PoolState.Inactive) {
         activeEpoch = EpochLib.currentEpoch();
         // #4: Store Aerodrome epoch start to ensure voting/finalization alignment
         aerodromeEpochStart = EpochLib.currentEpochStart();
         
-        // Set locking deadline: 90 minutes before epoch end (before Autopilot special window)
-        uint256 epochEnd = aerodromeEpochStart + 1 weeks;
-        lockingDeadline = epochEnd - SPECIAL_WINDOW_BUFFER;
+        // Set locking deadline dynamically from Autopilot's special window
+        // wrapperEndsAt marks when the unsafe deposit window starts
+        uint256 autopilotEpochId = autopilot.last_snapshot_id();
+        (, , , uint256 wrapperEndsAt) = autopilot.getEpochInfo(autopilotEpochId);
+        lockingDeadline = wrapperEndsAt;
         
         _setState(PoolState.Active);
     }
@@ -422,6 +422,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Update total voting power
         totalVotingPower += votingPowerAmount;
 
+        // Check if it's safe to deposit to Autopilot (avoid left side of special window)
+        // This prevents user confusion when new locks won't be used for current epoch
+        if (!_isSafeToDepositToAutopilot()) revert UnsafeDepositWindow();
+
         // Deposit NFT to Autopilot for automated vAPR voting
         votingEscrow.approve(address(autopilot), tokenId);
         try autopilot.deposit(tokenId) {
@@ -439,14 +443,46 @@ contract KickoffVoteSalePool is IERC721Receiver {
                     AUTOPILOT CLAIM & WITHDRAW
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Check if we're outside Autopilot's special window
-    /// @dev Special window is ~90 min before epoch end to ~30 min after epoch start
-    function _isOutsideAutopilotSpecialWindow() internal view returns (bool) {
-        uint256 epochEnd = aerodromeEpochStart + 1 weeks;
-        uint256 windowStart = epochEnd - 90 minutes; // 90 min before epoch end
-        uint256 windowEnd = epochEnd + 30 minutes;   // 30 min after epoch start (new epoch)
+    /// @notice Check if we're in Autopilot's special window (can't withdraw/claim)
+    /// @dev Dynamic check using Autopilot's current epoch info
+    /// @return true if in special window (operations restricted), false if safe to withdraw/claim
+    function _isInAutopilotSpecialWindow() internal view returns (bool) {
+        uint256 autopilotEpochId = autopilot.last_snapshot_id();
         
-        return block.timestamp < windowStart || block.timestamp > windowEnd;
+        // Get wrapper_ends_at from current epoch (when special window starts from Autopilot's side)
+        (, , , uint256 wrapperEndsAt) = autopilot.getEpochInfo(autopilotEpochId);
+        
+        // Get wrapper_starts_at from next epoch (when special window ends)
+        (, , uint256 wrapperStartsAt, ) = autopilot.getEpochInfo(autopilotEpochId + 1);
+        
+        // Window starts when current epoch's wrapper ends
+        // Window ends when next epoch's wrapper starts
+        uint256 windowStartsAt = wrapperEndsAt;
+        uint256 windowEndsAt = wrapperStartsAt;
+        
+        return (block.timestamp > windowStartsAt && block.timestamp <= windowEndsAt);
+    }
+
+    /// @notice Check if it's safe to deposit to Autopilot
+    /// @dev Restricts deposits during the left side of special window (~2 hours before epoch flip)
+    ///      to prevent user confusion when new locks won't be used for current epoch
+    /// @return true if safe to deposit, false if in unsafe deposit window
+    function _isSafeToDepositToAutopilot() internal view returns (bool) {
+        uint256 autopilotEpochId = autopilot.last_snapshot_id();
+        
+        // Get wrapper_ends_at from current epoch
+        (, , , uint256 wrapperEndsAt) = autopilot.getEpochInfo(autopilotEpochId);
+        
+        // Get epoch_starts_at from next epoch
+        (uint256 nextEpochStartsAt, , , ) = autopilot.getEpochInfo(autopilotEpochId + 1);
+        
+        // Unsafe window: from when wrapper ends to when next epoch starts
+        // This is the "left side" of the special window where deposits shouldn't happen
+        uint256 windowStartsAt = wrapperEndsAt;
+        uint256 windowEndsAt = nextEpochStartsAt;
+        
+        // Safe to deposit if we're NOT in this window
+        return !(block.timestamp > windowStartsAt && block.timestamp <= windowEndsAt);
     }
 
     /// @notice Start claiming USDC rewards from Autopilot in batches
@@ -476,8 +512,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
         uint256 aerodromeEpochEnd = aerodromeEpochStart + 1 weeks;
         if (block.timestamp <= aerodromeEpochEnd) revert EpochNotEnded();
         
-        // Ensure we're outside Autopilot's special window
-        if (!_isOutsideAutopilotSpecialWindow()) revert InAutopilotSpecialWindow();
+        // Ensure we're outside Autopilot's special window (dynamic check)
+        if (_isInAutopilotSpecialWindow()) revert InAutopilotSpecialWindow();
         
         _setState(PoolState.Finalizing);
         finalizeStep = FinalizeStep.ClaimingRewards;
@@ -741,14 +777,22 @@ contract KickoffVoteSalePool is IERC721Receiver {
         nft.unlocked = true;
         
         // If NFT is still in Autopilot, withdraw it first
-        // Note: Rewards were already claimed during finalization, no need to claim here
+        // Note: withdraw() automatically claims any remaining USDC rewards - send them to user
         if (depositedToAutopilot[tokenId]) {
-            // Ensure we're outside Autopilot's special window
-            if (!_isOutsideAutopilotSpecialWindow()) revert InAutopilotSpecialWindow();
+            // Ensure we're outside Autopilot's special window (dynamic check)
+            if (_isInAutopilotSpecialWindow()) revert InAutopilotSpecialWindow();
+            
+            uint256 usdcBefore = usdc.balanceOf(address(this));
             
             autopilot.withdraw(tokenId);
             depositedToAutopilot[tokenId] = false;
             emit WithdrawnFromAutopilot(tokenId);
+            
+            // Send any claimed USDC rewards to the NFT owner
+            uint256 usdcAfter = usdc.balanceOf(address(this));
+            if (usdcAfter > usdcBefore) {
+                _safeTransferUSDC(msg.sender, usdcAfter - usdcBefore);
+            }
         }
 
         // Transfer NFT back to owner
@@ -841,11 +885,19 @@ contract KickoffVoteSalePool is IERC721Receiver {
         nft.unlocked = true;
 
         // If NFT is in Autopilot, try to withdraw it
+        // Note: withdraw() automatically claims USDC rewards - send them to user
         if (depositedToAutopilot[tokenId]) {
-            try autopilot.claim(tokenId) {} catch {}
+            uint256 usdcBefore = usdc.balanceOf(address(this));
+            
             try autopilot.withdraw(tokenId) {
                 depositedToAutopilot[tokenId] = false;
                 emit WithdrawnFromAutopilot(tokenId);
+                
+                // Send any claimed USDC rewards to the NFT owner
+                uint256 usdcAfter = usdc.balanceOf(address(this));
+                if (usdcAfter > usdcBefore) {
+                    _safeTransferUSDC(nftOwner, usdcAfter - usdcBefore);
+                }
             } catch {
                 // Autopilot withdraw failed (likely during special window)
                 // NFT is marked unlocked but stays in Autopilot
@@ -927,11 +979,19 @@ contract KickoffVoteSalePool is IERC721Receiver {
             nft.unlocked = true;
             
             // If NFT is in Autopilot, try to withdraw it
+            // Note: withdraw() automatically claims USDC rewards - send them to user
             if (depositedToAutopilot[tokenId]) {
-                try autopilot.claim(tokenId) {} catch {}
+                uint256 usdcBefore = usdc.balanceOf(address(this));
+                
                 try autopilot.withdraw(tokenId) {
                     depositedToAutopilot[tokenId] = false;
                     emit WithdrawnFromAutopilot(tokenId);
+                    
+                    // Send any claimed USDC rewards to the NFT owner
+                    uint256 usdcAfter = usdc.balanceOf(address(this));
+                    if (usdcAfter > usdcBefore) {
+                        _safeTransferUSDC(nftOwner, usdcAfter - usdcBefore);
+                    }
                 } catch {
                     // Autopilot withdraw failed - NFT marked unlocked but stays in Autopilot
                     // Owner must call retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
@@ -950,6 +1010,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @param tokenIds Array of token IDs to retry withdrawal for
     /// @dev Call this after special window ends if emergency withdraw left NFTs in Autopilot
     /// @dev After successful retry, users can call claimUnlockedNFT() to get their NFTs
+    /// @dev Any USDC rewards from withdraw are sent to the NFT owner
     function retryAutopilotWithdraw(uint256[] calldata tokenIds) external onlyOwner {
         for (uint256 i = 0; i < tokenIds.length;) {
             uint256 tokenId = tokenIds[i];
@@ -957,10 +1018,18 @@ contract KickoffVoteSalePool is IERC721Receiver {
             
             // Only process if unlocked but still in Autopilot
             if (nft.unlocked && depositedToAutopilot[tokenId]) {
-                try autopilot.claim(tokenId) {} catch {}
+                address nftOwner = nft.owner;
+                uint256 usdcBefore = usdc.balanceOf(address(this));
+                
                 try autopilot.withdraw(tokenId) {
                     depositedToAutopilot[tokenId] = false;
                     emit WithdrawnFromAutopilot(tokenId);
+                    
+                    // Send any claimed USDC rewards to the NFT owner
+                    uint256 usdcAfter = usdc.balanceOf(address(this));
+                    if (usdcAfter > usdcBefore) {
+                        _safeTransferUSDC(nftOwner, usdcAfter - usdcBefore);
+                    }
                 } catch {
                     // Still failed - will need another retry
                 }
@@ -1188,6 +1257,17 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @dev Handles non-standard ERC20 tokens that don't return bool
     function _safeTransferProjectToken(address to, uint256 amount) internal {
         (bool success, bytes memory data) = projectToken.call(
+            abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
+        );
+        if (!success || (data.length > 0 && !abi.decode(data, (bool)))) {
+            revert TransferFailed();
+        }
+    }
+
+    /// @notice Safe transfer helper for USDC
+    /// @dev Checks return value to handle edge cases
+    function _safeTransferUSDC(address to, uint256 amount) internal {
+        (bool success, bytes memory data) = address(usdc).call(
             abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
         );
         if (!success || (data.length > 0 && !abi.decode(data, (bool)))) {

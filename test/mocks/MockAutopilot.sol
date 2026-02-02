@@ -8,8 +8,16 @@ contract MockAutopilot {
     mapping(uint256 => uint256) public pendingRewards;
     address public rewards_token;
     
+    // Fixed epoch times for testing (set during construction)
+    uint256 public currentEpochStart;
+    uint256 public currentEpochEnd;
+    
     constructor(address _rewardsToken) {
         rewards_token = _rewardsToken;
+        // Set epoch times based on Thursday-based epochs
+        // Find current epoch start (Thursday 00:00 UTC)
+        currentEpochStart = (block.timestamp / 1 weeks) * 1 weeks;
+        currentEpochEnd = currentEpochStart + 1 weeks;
     }
     
     function deposit(uint256 _lock_id) external {
@@ -50,8 +58,25 @@ contract MockAutopilot {
         return 1;
     }
     
-    function getEpochInfo(uint256) external view returns (uint256, uint256, uint256, uint256) {
-        return (block.timestamp - 1 weeks, block.timestamp, 0, 0);
+    function getEpochInfo(uint256 epochId) external view returns (uint256, uint256, uint256, uint256) {
+        // Use fixed epoch times based on Thursday-based epochs
+        // epoch_start, epoch_end, wrapped_start, wrapped_end
+        if (epochId == 1) {
+            // Current epoch
+            uint256 wrappedStart = currentEpochEnd - 90 minutes;  // Special window starts 90 min before end
+            uint256 wrappedEnd = currentEpochEnd + 30 minutes;    // Special window ends 30 min after
+            return (currentEpochStart, currentEpochEnd, wrappedStart, wrappedEnd);
+        }
+        // For next epoch (epochId == 2):
+        if (epochId == 2) {
+            uint256 nextEpochStart = currentEpochEnd;
+            uint256 nextEpochEnd = currentEpochEnd + 1 weeks;
+            uint256 wrappedStart = nextEpochEnd - 90 minutes;
+            uint256 wrappedEnd = nextEpochEnd + 30 minutes;
+            return (nextEpochStart, nextEpochEnd, wrappedStart, wrappedEnd);
+        }
+        // Default - return current epoch info
+        return (currentEpochStart, currentEpochEnd, currentEpochEnd - 90 minutes, currentEpochEnd + 30 minutes);
     }
     
     function window_preepoch_duration() external pure returns (uint256) {

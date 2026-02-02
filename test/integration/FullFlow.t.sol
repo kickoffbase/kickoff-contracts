@@ -16,6 +16,7 @@ import {IERC20} from "../../src/interfaces/IERC20.sol";
 /// @dev Run with: forge test --fork-url $BASE_RPC_URL -vvv
 contract FullFlowTest is Test {
     // Aerodrome contracts on Base mainnet
+    address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
@@ -50,7 +51,7 @@ contract FullFlowTest is Test {
         MockProjectToken(projectToken).mint(admin, TOTAL_ALLOCATION);
 
         // Deploy factory (this contract becomes owner)
-        factory = new KickoffFactory(VOTING_ESCROW, VOTER, ROUTER, WETH);
+        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH);
         lpLocker = factory.lpLocker();
 
         // Admin approves tokens
@@ -58,8 +59,9 @@ contract FullFlowTest is Test {
         IERC20(projectToken).approve(address(factory), TOTAL_ALLOCATION);
         
         // Factory owner creates pool, admin becomes pool admin
-        // #1: minVotingPower must be > 0
-        address poolAddr = factory.createPool(projectToken, projectOwner, TOTAL_ALLOCATION, 1 ether, admin);
+        // minVotingPower must be >= Autopilot's minimum_lock_amount
+        uint256 minVP = factory.getMinAutopilotVotingPower();
+        address poolAddr = factory.createPool(projectToken, projectOwner, TOTAL_ALLOCATION, minVP, admin);
         pool = KickoffVoteSalePool(poolAddr);
     }
 

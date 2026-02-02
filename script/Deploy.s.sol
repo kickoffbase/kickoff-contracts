@@ -46,6 +46,7 @@ contract Deploy is Script {
     // ============ Aerodrome Contracts on Base ============
     // Same addresses on Mainnet and Sepolia (Sepolia won't be functional but can verify deployment)
     
+    address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
@@ -84,6 +85,7 @@ contract Deploy is Script {
         
         // 1.1 KickoffFactory (deploys LPLocker in constructor)
         KickoffFactory kickoffFactory = new KickoffFactory(
+            AUTOPILOT,
             VOTING_ESCROW,
             VOTER,
             ROUTER,
@@ -194,6 +196,7 @@ contract Deploy is Script {
  *     --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY -vvvv
  */
 contract DeployVoteSaleOnly is Script {
+    address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
@@ -214,6 +217,7 @@ contract DeployVoteSaleOnly is Script {
 
         // Deploy Factory (includes LPLocker)
         KickoffFactory factory = new KickoffFactory(
+            AUTOPILOT,
             VOTING_ESCROW,
             VOTER,
             ROUTER,
@@ -355,6 +359,7 @@ contract DeployTokenFactoryOnly is Script {
  *     --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY -vvvv
  */
 contract DeployWithSalt is Script {
+    address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
@@ -375,6 +380,7 @@ contract DeployWithSalt is Script {
 
         // Vote-Sale Infrastructure
         KickoffFactory kickoffFactory = new KickoffFactory{salt: salt}(
+            AUTOPILOT,
             VOTING_ESCROW,
             VOTER,
             ROUTER,

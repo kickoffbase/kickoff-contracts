@@ -79,7 +79,7 @@ contract FullFlowForkTest is Test {
         projectToken.mint(admin, 10_000_000 ether);
 
         // Deploy factory
-        factory = new KickoffFactory(VOTING_ESCROW, VOTER, ROUTER, WETH);
+        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH);
         lpLocker = factory.lpLocker();
         reader = new KickoffPoolReader();
 

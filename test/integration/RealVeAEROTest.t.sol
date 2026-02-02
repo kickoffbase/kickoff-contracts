@@ -17,6 +17,7 @@ import {IERC20} from "../../src/interfaces/IERC20.sol";
 /// @dev Uses real veAERO, real voting, real swaps, real LP, REAL TRADING & FEES
 contract RealVeAEROTest is Test {
     // ============ AERODROME MAINNET CONTRACTS ============
+    address constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
     address constant VOTING_ESCROW = 0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4;
     address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address constant ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
@@ -58,7 +59,7 @@ contract RealVeAEROTest is Test {
         projectToken.mint(admin, 10_000_000 ether);
 
         // Deploy factory (this contract becomes owner)
-        factory = new KickoffFactory(VOTING_ESCROW, VOTER, ROUTER, WETH);
+        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH);
         lpLocker = factory.lpLocker();
         reader = new KickoffPoolReader();
 
@@ -67,8 +68,9 @@ contract RealVeAEROTest is Test {
         projectToken.approve(address(factory), 10_000_000 ether);
         
         // Factory owner creates pool, admin becomes pool admin
-        // #1: minVotingPower must be > 0
-        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether, 1 ether, admin));
+        // minVotingPower must be >= Autopilot's minimum_lock_amount (dynamic, currently 1000 veAERO)
+        uint256 minVP = factory.getMinAutopilotVotingPower();
+        pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether, minVP, admin));
     }
 
     /// @notice Full mainnet emulation with REAL trading and REAL fee claims

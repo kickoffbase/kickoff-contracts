@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {KickoffVoteSalePool} from "./KickoffVoteSalePool.sol";
 import {LPLocker} from "./LPLocker.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
+import {IAutopilot, IAutopilotDepositValidator} from "./interfaces/IAutopilot.sol";
 
 /// @title KickoffFactory
 /// @notice Factory contract for creating Vote-Sale pools for project launches
@@ -38,14 +39,6 @@ contract KickoffFactory {
     event PendingOwnerSet(address indexed pendingOwner);
 
     /*//////////////////////////////////////////////////////////////
-                                CONSTANTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Minimum voting power required by Autopilot (400 veAERO)
-    /// @dev Pools require minVotingPower >= this value for Autopilot compatibility
-    uint256 public constant MIN_AUTOPILOT_VOTING_POWER = 400e18;
-
-    /*//////////////////////////////////////////////////////////////
                                  STATE
     //////////////////////////////////////////////////////////////*/
 
@@ -57,6 +50,9 @@ contract KickoffFactory {
 
     /// @notice LP Locker contract for permanent LP locking
     LPLocker public immutable lpLocker;
+
+    /// @notice Autopilot PermanentLocksPoolV1 contract
+    address public immutable autopilot;
 
     /// @notice Aerodrome VotingEscrow contract
     address public immutable votingEscrow;
@@ -84,16 +80,18 @@ contract KickoffFactory {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Create a new KickoffFactory
+    /// @param _autopilot Autopilot PermanentLocksPoolV1 address
     /// @param _votingEscrow Aerodrome VotingEscrow (veAERO) address
     /// @param _voter Aerodrome Voter address
     /// @param _router Aerodrome Router address
     /// @param _weth WETH address
-    constructor(address _votingEscrow, address _voter, address _router, address _weth) {
-        if (_votingEscrow == address(0) || _voter == address(0) || _router == address(0) || _weth == address(0)) {
+    constructor(address _autopilot, address _votingEscrow, address _voter, address _router, address _weth) {
+        if (_autopilot == address(0) || _votingEscrow == address(0) || _voter == address(0) || _router == address(0) || _weth == address(0)) {
             revert ZeroAddress();
         }
 
         owner = msg.sender;
+        autopilot = _autopilot;
         votingEscrow = _votingEscrow;
         voter = _voter;
         router = _router;
@@ -137,8 +135,9 @@ contract KickoffFactory {
         if (minVotingPower == 0) {
             revert ZeroVotingPower();
         }
-        // Ensure minVotingPower meets Autopilot's minimum requirement (400 veAERO)
-        if (minVotingPower < MIN_AUTOPILOT_VOTING_POWER) {
+        // Ensure minVotingPower meets Autopilot's dynamic minimum requirement
+        uint256 autopilotMin = getMinAutopilotVotingPower();
+        if (minVotingPower < autopilotMin) {
             revert VotingPowerBelowAutopilotMin();
         }
         if (poolByToken[projectToken] != address(0)) {
@@ -180,6 +179,14 @@ contract KickoffFactory {
     /*//////////////////////////////////////////////////////////////
                               VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Get the minimum voting power required by Autopilot
+    /// @dev Reads dynamically from Autopilot's deposit_validator contract
+    /// @return The minimum veAERO voting power required for deposits
+    function getMinAutopilotVotingPower() public view returns (uint256) {
+        address validator = IAutopilot(autopilot).deposit_validator();
+        return IAutopilotDepositValidator(validator).minimum_lock_amount();
+    }
 
     /// @notice Get all created pools
     /// @return Array of pool addresses

@@ -16,20 +16,26 @@ contract KickoffFactoryTest is Test {
     address public user = address(0x3);
 
     // Aerodrome addresses on Base (for reference, we'll use mocks in unit tests)
+    address public autopilot = address(0x9);
+    address public depositValidator = address(0x99);
     address public votingEscrow = address(0x10);
     address public voter = address(0x11);
     address public router = address(0x12);
     address public weth = address(0x13);
 
     uint256 public constant TOTAL_ALLOCATION = 1_000_000 ether;
-    uint256 public constant MIN_VOTING_POWER = 400 ether; // Must be >= MIN_AUTOPILOT_VOTING_POWER (400 veAERO)
+    uint256 public constant MIN_VOTING_POWER = 1000 ether; // Must be >= Autopilot's minimum_lock_amount (dynamic)
 
     function setUp() public {
         // Deploy project token
         projectToken = new MockERC20("Project Token", "PROJECT", 18);
 
+        // Mock Autopilot's deposit_validator and minimum_lock_amount
+        vm.mockCall(autopilot, abi.encodeWithSignature("deposit_validator()"), abi.encode(depositValidator));
+        vm.mockCall(depositValidator, abi.encodeWithSignature("minimum_lock_amount()"), abi.encode(1000 ether));
+
         // Deploy factory (owner = address(this))
-        factory = new KickoffFactory(votingEscrow, voter, router, weth);
+        factory = new KickoffFactory(autopilot, votingEscrow, voter, router, weth);
 
         // Mint tokens to admin (pool admin)
         projectToken.mint(admin, TOTAL_ALLOCATION);
@@ -37,11 +43,16 @@ contract KickoffFactoryTest is Test {
 
     function test_Constructor() public view {
         assertEq(factory.owner(), address(this));
+        assertEq(factory.autopilot(), autopilot);
         assertEq(factory.votingEscrow(), votingEscrow);
         assertEq(factory.voter(), voter);
         assertEq(factory.router(), router);
         assertEq(factory.weth(), weth);
         assertTrue(address(factory.lpLocker()) != address(0));
+    }
+
+    function test_GetMinAutopilotVotingPower() public view {
+        assertEq(factory.getMinAutopilotVotingPower(), 1000 ether);
     }
 
     function test_CreatePool() public {
@@ -102,6 +113,15 @@ contract KickoffFactoryTest is Test {
         // #1: minVotingPower = 0 should revert
         vm.expectRevert(KickoffFactory.ZeroVotingPower.selector);
         factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 0, admin);
+    }
+
+    function test_CreatePool_RevertBelowAutopilotMin() public {
+        vm.prank(admin);
+        projectToken.approve(address(factory), TOTAL_ALLOCATION);
+
+        // minVotingPower below Autopilot's minimum_lock_amount (1000 ether) should revert
+        vm.expectRevert(KickoffFactory.VotingPowerBelowAutopilotMin.selector);
+        factory.createPool(address(projectToken), projectOwner, TOTAL_ALLOCATION, 999 ether, admin);
     }
 
     function test_CreatePool_RevertDuplicate() public {

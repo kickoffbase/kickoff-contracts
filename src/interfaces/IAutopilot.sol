@@ -81,4 +81,16 @@ interface IAutopilot {
 
     /// @notice Post-epoch window duration (time after epoch start when special window ends)
     function window_postepoch_duration() external view returns (uint256);
+
+    /// @notice Returns the deposit validator contract address
+    /// @dev Used to get the minimum lock amount requirement
+    function deposit_validator() external view returns (address);
+}
+
+/// @title IAutopilotDepositValidator
+/// @notice Interface for Autopilot's deposit validator contract
+interface IAutopilotDepositValidator {
+    /// @notice Returns the minimum lock amount required for deposits
+    /// @return The minimum veAERO voting power required
+    function minimum_lock_amount() external view returns (uint256);
 }

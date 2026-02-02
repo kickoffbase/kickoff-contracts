@@ -41,10 +41,12 @@ contract KickoffVoteSalePoolTest is Test {
     address constant USDC_ADDRESS = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
+    address constant AUTOPILOT_DEPOSIT_VALIDATOR = address(0x999);
+    
     uint256 public constant TOTAL_ALLOCATION = 1_000_000 ether;
     uint256 public constant USER1_VOTING_POWER = 100_000 ether;
     uint256 public constant USER2_VOTING_POWER = 50_000 ether;
-    uint256 public constant MIN_VOTING_POWER = 400 ether; // Autopilot minimum
+    uint256 public constant MIN_VOTING_POWER = 1000 ether; // Autopilot minimum (dynamic)
 
     function setUp() public {
         // Set realistic timestamp (current epoch > 0)
@@ -65,6 +67,24 @@ contract KickoffVoteSalePoolTest is Test {
         autopilot = new MockAutopilot(USDC_ADDRESS);
         vm.etch(AUTOPILOT_ADDRESS, address(autopilot).code);
         
+        // Mock Autopilot's deposit_validator and minimum_lock_amount
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSignature("deposit_validator()"), abi.encode(AUTOPILOT_DEPOSIT_VALIDATOR));
+        vm.mockCall(AUTOPILOT_DEPOSIT_VALIDATOR, abi.encodeWithSignature("minimum_lock_amount()"), abi.encode(1000 ether));
+        
+        // Mock Autopilot's epoch info for dynamic lockingDeadline
+        // Current epoch (id=1): Thursday-based epochs
+        uint256 currentEpochStart = (block.timestamp / 1 weeks) * 1 weeks;
+        uint256 currentEpochEnd = currentEpochStart + 1 weeks;
+        uint256 wrappedStart = currentEpochEnd - 90 minutes;
+        uint256 wrappedEnd = currentEpochEnd + 30 minutes;
+        
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSignature("last_snapshot_id()"), abi.encode(uint256(1)));
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSelector(bytes4(keccak256("getEpochInfo(uint256)")), uint256(1)), 
+            abi.encode(currentEpochStart, currentEpochEnd, wrappedStart, wrappedEnd));
+        // Next epoch (id=2)
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSelector(bytes4(keccak256("getEpochInfo(uint256)")), uint256(2)), 
+            abi.encode(currentEpochEnd, currentEpochEnd + 1 weeks, currentEpochEnd + 1 weeks - 90 minutes, currentEpochEnd + 1 weeks + 30 minutes));
+        
         // Mock Aerodrome PoolFactory - always return true for isPool
         vm.mockCall(
             AERODROME_POOL_FACTORY,
@@ -78,6 +98,7 @@ contract KickoffVoteSalePoolTest is Test {
 
         // Deploy factory
         factory = new KickoffFactory(
+            AUTOPILOT_ADDRESS,
             address(votingEscrow),
             address(voter),
             address(router),
@@ -103,6 +124,40 @@ contract KickoffVoteSalePoolTest is Test {
         // Mint veAERO NFTs to users (must be >= MIN_VOTING_POWER)
         votingEscrow.mint(user1, USER1_VOTING_POWER, block.timestamp + 365 days);
         votingEscrow.mint(user2, USER2_VOTING_POWER, block.timestamp + 365 days);
+    }
+
+    /// @notice Helper to update Autopilot mocks after warping to a new epoch
+    /// @dev Call this after vm.warp() to ensure dynamic window checks work correctly
+    function _updateAutopilotMocksForNextEpoch() internal {
+        // Clear previous mocks
+        vm.clearMockedCalls();
+        
+        // Re-mock deposit_validator
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSignature("deposit_validator()"), abi.encode(AUTOPILOT_DEPOSIT_VALIDATOR));
+        vm.mockCall(AUTOPILOT_DEPOSIT_VALIDATOR, abi.encodeWithSignature("minimum_lock_amount()"), abi.encode(1000 ether));
+        
+        // Calculate new epoch info based on current block.timestamp
+        uint256 currentEpochStart = (block.timestamp / 1 weeks) * 1 weeks;
+        uint256 currentEpochEnd = currentEpochStart + 1 weeks;
+        uint256 wrappedStart = currentEpochEnd - 90 minutes;
+        uint256 wrappedEnd = currentEpochEnd + 30 minutes;
+        
+        // Update epoch ID to 2 (we're in a new epoch)
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSignature("last_snapshot_id()"), abi.encode(uint256(2)));
+        
+        // Current epoch (id=2)
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSelector(bytes4(keccak256("getEpochInfo(uint256)")), uint256(2)), 
+            abi.encode(currentEpochStart, currentEpochEnd, wrappedStart, wrappedEnd));
+        // Next epoch (id=3)
+        vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSelector(bytes4(keccak256("getEpochInfo(uint256)")), uint256(3)), 
+            abi.encode(currentEpochEnd, currentEpochEnd + 1 weeks, currentEpochEnd + 1 weeks - 90 minutes, currentEpochEnd + 1 weeks + 30 minutes));
+        
+        // Re-mock PoolFactory
+        vm.mockCall(
+            AERODROME_POOL_FACTORY,
+            abi.encodeWithSignature("isPool(address)"),
+            abi.encode(true)
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -316,6 +371,9 @@ contract KickoffVoteSalePoolTest is Test {
         // checkStateTransition modifier will auto-transition from Active to Voting
         uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
         vm.warp(nextEpochStart + 2 hours); // Past special window
+        
+        // Update Autopilot mocks for the new epoch (so we're outside special window)
+        _updateAutopilotMocksForNextEpoch();
 
         // Autopilot finalization flow (auto-transitions Active -> Voting)
         vm.startPrank(admin);
@@ -497,6 +555,9 @@ contract KickoffVoteSalePoolTest is Test {
         // checkStateTransition modifier will auto-transition Active -> Voting
         uint256 nextEpochStart = ((block.timestamp / 1 weeks) + 1) * 1 weeks;
         vm.warp(nextEpochStart + 2 hours);
+        
+        // Update Autopilot mocks for the new epoch (so we're outside special window)
+        _updateAutopilotMocksForNextEpoch();
 
         // Autopilot finalization flow (auto-transitions state)
         vm.startPrank(admin);
