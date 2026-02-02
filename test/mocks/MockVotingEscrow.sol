@@ -6,10 +6,17 @@ import {IERC721Receiver} from "../../src/interfaces/IERC721Receiver.sol";
 /// @title MockVotingEscrow
 /// @notice Mock veAERO NFT for testing
 contract MockVotingEscrow {
+    /// @notice LockedBalance struct matching IVotingEscrow
+    struct LockedBalance {
+        int128 amount;
+        uint256 end;
+        bool isPermanent;
+    }
+
     struct NFT {
         address owner;
         uint256 votingPower;
-        uint256 lockEnd;
+        bool isPermanent;
     }
 
     mapping(uint256 => NFT) public nfts;
@@ -22,9 +29,9 @@ contract MockVotingEscrow {
     event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
 
-    function mint(address to, uint256 votingPower, uint256 lockEnd) external returns (uint256 tokenId) {
+    function mint(address to, uint256 votingPower, bool isPermanent) external returns (uint256 tokenId) {
         tokenId = nextTokenId++;
-        nfts[tokenId] = NFT({owner: to, votingPower: votingPower, lockEnd: lockEnd});
+        nfts[tokenId] = NFT({owner: to, votingPower: votingPower, isPermanent: isPermanent});
         emit Transfer(address(0), to, tokenId);
     }
 
@@ -102,9 +109,13 @@ contract MockVotingEscrow {
         }
     }
 
-    function locked(uint256 tokenId) external view returns (int128 amount, uint256 end) {
+    function locked(uint256 tokenId) external view returns (LockedBalance memory) {
         NFT storage nft = nfts[tokenId];
-        return (int128(int256(nft.votingPower)), nft.lockEnd);
+        return LockedBalance({
+            amount: int128(int256(nft.votingPower)),
+            end: nft.isPermanent ? 0 : block.timestamp + 365 days,
+            isPermanent: nft.isPermanent
+        });
     }
 
     function totalSupply() external pure returns (uint256) {
@@ -122,7 +133,7 @@ contract MockVotingEscrow {
     /// @notice Convert a lock to permanent
     function lockPermanent(uint256 tokenId) external {
         require(_isApprovedOrOwner(msg.sender, tokenId), "Not approved");
-        nfts[tokenId].lockEnd = 0; // 0 means permanent
+        nfts[tokenId].isPermanent = true;
     }
 
     /// @notice Check if NFT is deactivated (always false in mock)

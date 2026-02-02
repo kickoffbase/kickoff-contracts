@@ -133,8 +133,9 @@ contract KickoffVoteSalePoolTest is Test {
         pool = KickoffVoteSalePool(poolAddr);
 
         // Mint veAERO NFTs to users (must be >= MIN_VOTING_POWER)
-        votingEscrow.mint(user1, USER1_VOTING_POWER, block.timestamp + 365 days);
-        votingEscrow.mint(user2, USER2_VOTING_POWER, block.timestamp + 365 days);
+        // isPermanent = false so lockVeAERO will call lockPermanent()
+        votingEscrow.mint(user1, USER1_VOTING_POWER, false);
+        votingEscrow.mint(user2, USER2_VOTING_POWER, false);
     }
 
     /// @notice Helper to update Autopilot mocks after warping to a new epoch

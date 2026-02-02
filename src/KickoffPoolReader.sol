@@ -40,7 +40,7 @@ interface IAutopilotReader {
 contract KickoffPoolReader {
     
     /// @notice Autopilot contract address on Base mainnet
-    address public constant AUTOPILOT = 0x35cbd6982334e377e05F16DB14DcC1d191644D5c;
+    address public constant AUTOPILOT = 0xA7c68a960bA0F6726C4b7446004FE64969E2b4d4;
 
     /// @notice Default page size for paginated queries
     uint256 public constant DEFAULT_PAGE_SIZE = 100;

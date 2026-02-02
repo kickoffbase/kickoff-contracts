@@ -426,9 +426,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
         }
 
         // Make lock permanent if not already (required for Autopilot deposit)
-        // lock.end == 0 means already permanent
-        (, uint256 lockEnd) = votingEscrow.locked(tokenId);
-        if (lockEnd != 0) {
+        IVotingEscrow.LockedBalance memory lockInfo = votingEscrow.locked(tokenId);
+        if (!lockInfo.isPermanent) {
             votingEscrow.lockPermanent(tokenId);
         }
 

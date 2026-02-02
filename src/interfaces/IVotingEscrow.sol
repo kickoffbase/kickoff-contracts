@@ -66,11 +66,17 @@ interface IVotingEscrow {
     /// @param approved Whether to approve or revoke
     function setApprovalForAll(address operator, bool approved) external;
 
-    /// @notice Get the locked amount and end time for an NFT
+    /// @notice LockedBalance struct returned by locked()
+    struct LockedBalance {
+        int128 amount;
+        uint256 end;
+        bool isPermanent;
+    }
+
+    /// @notice Get the locked balance info for an NFT
     /// @param tokenId The NFT token ID
-    /// @return amount The locked AERO amount
-    /// @return end The lock end timestamp
-    function locked(uint256 tokenId) external view returns (int128 amount, uint256 end);
+    /// @return The LockedBalance struct with amount, end, and isPermanent
+    function locked(uint256 tokenId) external view returns (LockedBalance memory);
 
     /// @notice Get the total voting power
     /// @return The total supply of voting power
