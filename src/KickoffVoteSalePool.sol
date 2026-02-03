@@ -12,6 +12,7 @@ import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
 import {IAutopilot} from "./interfaces/IAutopilot.sol";
 import {INonfungiblePositionManager} from "./interfaces/INonfungiblePositionManager.sol";
 import {ICLFactory} from "./interfaces/ICLFactory.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title KickoffVoteSalePool
 /// @notice Vote-Sale pool for veAERO holders to participate in project launches
@@ -68,7 +69,11 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error NotInAutopilot();
     error StillInAutopilot();
     error InAutopilotSpecialWindow();
+    error LiquidityAdditionFailed();
     error UnsafeDepositWindow();
+    error InvalidLiquidityAmounts();
+    error SqrtPriceZero();
+    error SqrtPriceOverflow();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -742,8 +747,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
                 ? (projectToken, wethAddr, liquidityAllocation, wethToUse)
                 : (wethAddr, projectToken, wethToUse, liquidityAllocation);
 
-        // Approve position manager
+        // Approve position manager (reset to 0 first for tokens like USDT that require it)
+        IERC20(token0).approve(address(clPositionManager), 0);
         IERC20(token0).approve(address(clPositionManager), amount0);
+        IERC20(token1).approve(address(clPositionManager), 0);
         IERC20(token1).approve(address(clPositionManager), amount1);
 
         // Calculate sqrtPriceX96 for initial price (token1/token0)
@@ -770,48 +777,45 @@ contract KickoffVoteSalePool is IERC721Receiver {
             sqrtPriceX96: sqrtPriceX96
         });
 
-        try clPositionManager.mint(params) returns (
-            uint256 tokenId,
-            uint128,  // liquidity
-            uint256,  // amount0Used
-            uint256   // amount1Used
-        ) {
-            lpPositionId = tokenId;
-            // Store LP token as position manager address (for compatibility)
-            lpToken = address(clPositionManager);
-            // #19: Any unused tokens stay in contract for distribution via claimDust()
-        } catch {
-            // Liquidity addition failed
-            lpPositionId = 0;
-        }
-    }
-
-    /// @notice Calculate sqrtPriceX96 from token amounts
-    /// @dev sqrtPriceX96 = sqrt(amount1/amount0) * 2^96
-    function _calculateSqrtPriceX96(uint256 amount0, uint256 amount1) internal pure returns (uint160) {
-        if (amount0 == 0) return 0;
-        // price = amount1 / amount0
-        // sqrtPriceX96 = sqrt(price) * 2^96
-        // To avoid overflow: sqrt(amount1) * 2^96 / sqrt(amount0)
-        uint256 sqrtAmount1 = _sqrt(amount1);
-        uint256 sqrtAmount0 = _sqrt(amount0);
-        if (sqrtAmount0 == 0) return 0;
+        // Mint position - revert on failure instead of silent fail
+        (uint256 tokenId,,,) = clPositionManager.mint(params);
         
-        // sqrtPriceX96 = sqrtAmount1 * 2^96 / sqrtAmount0
-        uint256 result = (sqrtAmount1 << 96) / sqrtAmount0;
-        return uint160(result);
+        if (tokenId == 0) revert LiquidityAdditionFailed();
+        
+        lpPositionId = tokenId;
+        // Store LP token as position manager address (for compatibility)
+        lpToken = address(clPositionManager);
+        
+        // Reset approvals for unused amounts (security best practice)
+        IERC20(token0).approve(address(clPositionManager), 0);
+        IERC20(token1).approve(address(clPositionManager), 0);
     }
 
-    /// @notice Babylonian square root
-    function _sqrt(uint256 x) internal pure returns (uint256) {
-        if (x == 0) return 0;
-        uint256 z = (x + 1) / 2;
-        uint256 y = x;
-        while (z < y) {
-            y = z;
-            z = (x / z + z) / 2;
-        }
-        return y;
+    /// @notice Calculate sqrtPriceX96 from token amounts with full precision
+    /// @dev sqrtPriceX96 = sqrt(amount1 * 2^192 / amount0) - canonical V3 formula
+    /// @dev Uses OpenZeppelin Math.mulDiv for 512-bit intermediate precision
+    function _calculateSqrtPriceX96(uint256 amount0, uint256 amount1) internal pure returns (uint160) {
+        // Validate inputs - both amounts must be non-zero
+        if (amount0 == 0 || amount1 == 0) revert InvalidLiquidityAmounts();
+        
+        // Canonical V3 formula: sqrtPriceX96 = sqrt(amount1 * 2^192 / amount0)
+        // This is more precise than sqrt(amount1) * 2^96 / sqrt(amount0) because
+        // it only has one floor operation (in sqrt) instead of three
+        //
+        // Step 1: Calculate ratioX192 = amount1 * 2^192 / amount0 using mulDiv
+        uint256 Q192 = uint256(1) << 192;
+        uint256 ratioX192 = Math.mulDiv(amount1, Q192, amount0);
+        
+        // Step 2: Take sqrt of the ratio
+        uint256 result = Math.sqrt(ratioX192);
+        
+        // Validate result is non-zero (would cause CL mint to fail)
+        if (result == 0) revert SqrtPriceZero();
+        
+        // Validate result fits in uint160 (prevent silent truncation)
+        if (result > type(uint160).max) revert SqrtPriceOverflow();
+        
+        return uint160(result);
     }
 
     /// @notice Lock CL position in LPLocker

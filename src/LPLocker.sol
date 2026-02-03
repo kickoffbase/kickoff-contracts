@@ -204,8 +204,8 @@ contract LPLocker is IERC721Receiver {
         
         if (liquidity == 0) revert InvalidPosition();
         
-        // Transfer NFT position to this contract
-        positionManager.transferFrom(msg.sender, address(this), positionId);
+        // Transfer NFT position to this contract (safe transfer validates receiver)
+        positionManager.safeTransferFrom(msg.sender, address(this), positionId);
 
         // Store locked position info
         lockedPools[msg.sender] = LockedPosition({
