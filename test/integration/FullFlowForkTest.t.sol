@@ -105,6 +105,32 @@ contract FullFlowForkTest is Test {
         );
     }
 
+    // ============ HELPER FUNCTIONS ============
+
+    /// @notice Helper to perform two-phase veAERO deposit (required due to Aerodrome same-block VP reset)
+    /// @dev depositVeAERO in block N, confirmDeposit in block N+1
+    function _lockVeAERO(address owner, uint256 tokenId) internal returns (bool success) {
+        vm.startPrank(owner);
+        ve.approve(address(pool), tokenId);
+        
+        try pool.depositVeAERO(tokenId) {
+            vm.stopPrank();
+            
+            // Advance to next block (required because Aerodrome resets VP on same-block ownership change)
+            vm.roll(block.number + 1);
+            
+            // Confirm the deposit
+            try pool.confirmDeposit(tokenId) {
+                return true;
+            } catch {
+                return false;
+            }
+        } catch {
+            vm.stopPrank();
+            return false;
+        }
+    }
+
     // ============ MAIN TEST ============
 
     /// @notice Full flow test with 5 real veNFT holders
@@ -247,11 +273,8 @@ contract FullFlowForkTest is Test {
                     if (deactivated) continue;
                 } catch {}
                 
-                // Try to lock
-                vm.startPrank(owner);
-                ve.approve(address(pool), tokenId);
-                
-                try pool.lockVeAERO(tokenId) {
+                // Try to lock using two-phase deposit
+                if (_lockVeAERO(owner, tokenId)) {
                     lockedNFTs.push(tokenId);
                     nftOwners.push(owner);
                     totalLockedVP += vp;
@@ -264,13 +287,7 @@ contract FullFlowForkTest is Test {
                     
                     // Verify deposited to Autopilot (mocked)
                     assertTrue(pool.depositedToAutopilot(tokenId), "Should be marked as in Autopilot");
-                } catch Error(string memory reason) {
-                    console.log("  Lock failed for NFT", tokenId, ":", reason);
-                } catch {
-                    // Skip if lock fails for any reason
                 }
-                
-                vm.stopPrank();
             } catch {
                 continue;
             }
@@ -651,10 +668,8 @@ contract FullFlowForkTest is Test {
             return;
         }
         
-        vm.startPrank(owner);
-        ve.approve(address(pool), tokenId);
-        pool.lockVeAERO(tokenId);
-        vm.stopPrank();
+        bool success = _lockVeAERO(owner, tokenId);
+        assertTrue(success, "Lock should succeed");
         
         assertTrue(pool.depositedToAutopilot(tokenId), "Should be in Autopilot");
         
@@ -720,12 +735,13 @@ contract FullFlowForkTest is Test {
         if (tokenId == 0) {
             console.log("No eligible NFT, testing cancel with no locks");
         } else {
-            vm.startPrank(owner);
-            ve.approve(address(pool), tokenId);
-            pool.lockVeAERO(tokenId);
-            vm.stopPrank();
-            
-            console.log("Locked NFT:", tokenId);
+            bool success = _lockVeAERO(owner, tokenId);
+            if (success) {
+                console.log("Locked NFT:", tokenId);
+            } else {
+                console.log("Failed to lock NFT, testing cancel with no locks");
+                tokenId = 0;
+            }
             
             // Emergency withdraw all NFTs first
             uint256 epochEnd = pool.aerodromeEpochStart() + 1 weeks;

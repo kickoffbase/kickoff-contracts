@@ -108,13 +108,13 @@ contract AutopilotIntegrationTest is Test {
         );
     }
 
-    /// @notice Test locking with Autopilot deposit
-    function test_LockVeAERO_DepositsToAutopilot() public {
+    /// @notice Test two-phase locking with Autopilot deposit
+    function test_DepositVeAERO_TwoPhaseFlow() public {
         if (block.chainid != 8453) { vm.skip(true); return; }
 
         console.log("");
         console.log("================================================================");
-        console.log("   TEST: LOCK veAERO WITH AUTOPILOT DEPOSIT");
+        console.log("   TEST: TWO-PHASE DEPOSIT veAERO WITH AUTOPILOT");
         console.log("================================================================");
 
         // Activate pool
@@ -138,13 +138,9 @@ contract AutopilotIntegrationTest is Test {
         console.log("Owner:", nftOwner);
         console.log("Voting power:", vpBefore);
         
-        // Impersonate owner and approve
-        vm.startPrank(nftOwner);
-        ve.approve(address(pool), tokenId);
-        
-        // Lock - this should deposit to Autopilot
-        pool.lockVeAERO(tokenId);
-        vm.stopPrank();
+        // Use two-phase helper to lock
+        bool success = _lockVeAERO(nftOwner, tokenId);
+        assertTrue(success, "Lock should succeed");
         
         // Verify NFT is tracked in pool
         (address owner, uint256 vp, bool unlocked) = pool.lockedNFTs(tokenId);
@@ -155,7 +151,7 @@ contract AutopilotIntegrationTest is Test {
         // Verify NFT is in Autopilot
         assertTrue(pool.depositedToAutopilot(tokenId), "Should be deposited to Autopilot");
         
-        console.log("SUCCESS: NFT locked and deposited to Autopilot");
+        console.log("SUCCESS: NFT locked and deposited to Autopilot via two-phase flow");
     }
 
     /// @notice Test automatic state transition at lockingDeadline
@@ -182,17 +178,16 @@ contract AutopilotIntegrationTest is Test {
         // Find and lock an NFT (should work)
         (uint256 tokenId, address nftOwner) = _findEligibleNFT();
         if (tokenId > 0) {
-            vm.startPrank(nftOwner);
-            ve.approve(address(pool), tokenId);
-            pool.lockVeAERO(tokenId);
-            vm.stopPrank();
-            console.log("Locked NFT before deadline");
+            bool success = _lockVeAERO(nftOwner, tokenId);
+            if (success) {
+                console.log("Locked NFT before deadline");
+            }
         }
         
         // Warp to after deadline
         vm.warp(lockingDeadline + 1);
         
-        // Try to lock another NFT - should fail after checkStateTransition
+        // Try to deposit another NFT - should fail after checkStateTransition
         (uint256 tokenId2, address nftOwner2) = _findEligibleNFT2();
         if (tokenId2 > 0 && tokenId2 != tokenId) {
             vm.startPrank(nftOwner2);
@@ -200,10 +195,10 @@ contract AutopilotIntegrationTest is Test {
             
             // This should trigger auto-transition and then revert with InvalidState
             vm.expectRevert(KickoffVoteSalePool.InvalidState.selector);
-            pool.lockVeAERO(tokenId2);
+            pool.depositVeAERO(tokenId2);
             vm.stopPrank();
             
-            console.log("Lock correctly rejected after deadline");
+            console.log("Deposit correctly rejected after deadline");
         }
         
         // Verify state transitioned to Voting
@@ -243,7 +238,7 @@ contract AutopilotIntegrationTest is Test {
         ve.approve(address(pool), lowVpNft);
         
         vm.expectRevert(KickoffVoteSalePool.VotingPowerTooLow.selector);
-        pool.lockVeAERO(lowVpNft);
+        pool.depositVeAERO(lowVpNft);
         vm.stopPrank();
         
         console.log("SUCCESS: Low VP NFT correctly rejected");
@@ -268,10 +263,8 @@ contract AutopilotIntegrationTest is Test {
             return;
         }
         
-        vm.startPrank(nftOwner);
-        ve.approve(address(pool), tokenId);
-        pool.lockVeAERO(tokenId);
-        vm.stopPrank();
+        bool success = _lockVeAERO(nftOwner, tokenId);
+        assertTrue(success, "Lock should succeed");
         
         assertTrue(pool.depositedToAutopilot(tokenId), "Should be in Autopilot");
         
@@ -324,10 +317,8 @@ contract AutopilotIntegrationTest is Test {
             return;
         }
         
-        vm.startPrank(nftOwner);
-        ve.approve(address(pool), tokenId);
-        pool.lockVeAERO(tokenId);
-        vm.stopPrank();
+        bool success = _lockVeAERO(nftOwner, tokenId);
+        assertTrue(success, "Lock should succeed");
         
         assertTrue(pool.depositedToAutopilot(tokenId), "Should be in Autopilot");
         
@@ -360,7 +351,7 @@ contract AutopilotIntegrationTest is Test {
         pool.activate();
         console.log("Phase 1: Pool activated");
         
-        // Phase 2: Lock NFTs
+        // Phase 2: Lock NFTs (using two-phase deposit flow)
         uint256 lockedCount = 0;
         for (uint256 i = 0; i < NFT_IDS.length && lockedCount < 3; i++) {
             uint256 tokenId = NFT_IDS[i];
@@ -379,19 +370,13 @@ contract AutopilotIntegrationTest is Test {
                     if (deactivated) continue;
                 } catch {}
                 
-                vm.startPrank(nftOwner);
-                ve.approve(address(pool), tokenId);
-                
-                try pool.lockVeAERO(tokenId) {
+                // Use two-phase lock helper
+                if (_lockVeAERO(nftOwner, tokenId)) {
                     lockedNftIds.push(tokenId);
                     lockedOwners.push(nftOwner);
                     lockedCount++;
                     console.log("Locked NFT:", tokenId, "VP:", vp);
-                } catch {
-                    // Skip if lock fails
                 }
-                
-                vm.stopPrank();
             } catch {
                 continue;
             }
@@ -453,6 +438,30 @@ contract AutopilotIntegrationTest is Test {
     }
 
     // ============ HELPER FUNCTIONS ============
+
+    /// @notice Helper to perform two-phase veAERO deposit (required due to Aerodrome same-block VP reset)
+    /// @dev depositVeAERO in block N, confirmDeposit in block N+1
+    function _lockVeAERO(address nftOwner, uint256 tokenId) internal returns (bool success) {
+        vm.startPrank(nftOwner);
+        ve.approve(address(pool), tokenId);
+        
+        try pool.depositVeAERO(tokenId) {
+            vm.stopPrank();
+            
+            // Advance to next block (required because Aerodrome resets VP on same-block ownership change)
+            vm.roll(block.number + 1);
+            
+            // Confirm the deposit
+            try pool.confirmDeposit(tokenId) {
+                return true;
+            } catch {
+                return false;
+            }
+        } catch {
+            vm.stopPrank();
+            return false;
+        }
+    }
 
     function _findEligibleNFT() internal view returns (uint256 tokenId, address nftOwner) {
         for (uint256 i = 0; i < NFT_IDS.length; i++) {

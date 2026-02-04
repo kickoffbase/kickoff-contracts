@@ -74,6 +74,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error InvalidLiquidityAmounts();
     error SqrtPriceZero();
     error SqrtPriceOverflow();
+    error NoPendingDeposit();
+    error SameBlockDeposit();
+    error AlreadyPending();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -91,6 +94,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     event DepositedToAutopilot(uint256 indexed tokenId);
     event WithdrawnFromAutopilot(uint256 indexed tokenId);
     event AutopilotRewardsClaimed(uint256 indexed tokenId, uint256 amount);
+    event VeAERODeposited(address indexed user, uint256 indexed tokenId, uint256 votingPower);
+    event DepositConfirmed(address indexed user, uint256 indexed tokenId);
 
     /*//////////////////////////////////////////////////////////////
                                  ENUMS
@@ -121,6 +126,14 @@ contract KickoffVoteSalePool is IERC721Receiver {
     struct UserInfo {
         uint256 totalVotingPower;
         bool claimed;
+    }
+
+    /// @notice Info about a pending veAERO deposit (two-phase deposit)
+    /// @dev Required because Aerodrome returns balanceOfNFT=0 when ownership changes in same block
+    struct PendingDeposit {
+        address owner;
+        uint256 depositBlock;
+        uint256 votingPower;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -268,6 +281,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Track which NFTs are deposited in Autopilot
     mapping(uint256 => bool) public depositedToAutopilot;
 
+    /// @notice Track pending deposits (two-phase deposit due to Aerodrome same-block voting power reset)
+    mapping(uint256 => PendingDeposit) public pendingDeposits;
+
     /*//////////////////////////////////////////////////////////////
                           SLIPSTREAM (CL) INTEGRATION
     //////////////////////////////////////////////////////////////*/
@@ -392,11 +408,14 @@ contract KickoffVoteSalePool is IERC721Receiver {
         _setState(PoolState.Voting);
     }
 
-    /// @notice Lock a veAERO NFT to participate in the vote-sale
+    /// @notice Phase 1: Deposit a veAERO NFT to participate in the vote-sale
     /// @param tokenId The veAERO NFT token ID
-    /// @dev NFT is automatically deposited to Autopilot for vAPR optimization
+    /// @dev NFT is transferred to this contract and stored as pending
+    /// @dev Must call confirmDeposit() in a DIFFERENT block to complete the deposit to Autopilot
+    /// @dev This two-phase approach is required because Aerodrome resets voting power to 0
+    ///      when NFT ownership changes in the same block (flash loan protection)
     /// @dev WARNING: NFT will be converted to permanent lock (4-year max) by Autopilot
-    function lockVeAERO(uint256 tokenId) external nonReentrant checkStateTransition {
+    function depositVeAERO(uint256 tokenId) external nonReentrant checkStateTransition {
         // Check state after potential auto-transition
         if (state != PoolState.Active) revert InvalidState();
         
@@ -407,6 +426,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
         if (votingEscrow.ownerOf(tokenId) != msg.sender) {
             revert NotNFTOwner();
         }
+        
+        // Check not already pending
+        if (pendingDeposits[tokenId].owner != address(0)) revert AlreadyPending();
         
         // #2: Check if NFT is deactivated (managed NFT deactivation)
         try votingEscrow.deactivated(tokenId) returns (bool isDeactivated) {
@@ -422,7 +444,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
             revert AlreadyVotedThisEpoch();
         }
 
-        // Get voting power
+        // Get voting power BEFORE transfer (will be 0 after transfer in same block)
         uint256 votingPowerAmount = votingEscrow.balanceOfNFT(tokenId);
         
         // Check minimum voting power with whitelist support
@@ -441,23 +463,55 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Transfer NFT to this contract
         votingEscrow.safeTransferFrom(msg.sender, address(this), tokenId);
 
+        // Store as pending deposit - will be confirmed in next block
+        pendingDeposits[tokenId] = PendingDeposit({
+            owner: msg.sender,
+            depositBlock: block.number,
+            votingPower: votingPowerAmount
+        });
+
+        emit VeAERODeposited(msg.sender, tokenId, votingPowerAmount);
+    }
+
+    /// @notice Phase 2: Confirm a pending deposit and deposit to Autopilot
+    /// @param tokenId The veAERO NFT token ID
+    /// @dev Can be called by anyone (permissionless) in a block AFTER depositVeAERO was called
+    /// @dev This completes the deposit flow by depositing to Autopilot
+    function confirmDeposit(uint256 tokenId) external nonReentrant checkStateTransition {
+        PendingDeposit memory pending = pendingDeposits[tokenId];
+        
+        // Check there's a pending deposit
+        if (pending.owner == address(0)) revert NoPendingDeposit();
+        
+        // Check we're in a different block (Aerodrome voting power is available again)
+        if (block.number <= pending.depositBlock) revert SameBlockDeposit();
+        
+        // Check state (can confirm even after locking deadline, but not after Active state)
+        if (state != PoolState.Active && state != PoolState.Voting) revert InvalidState();
+        
+        // Check if it's safe to deposit to Autopilot
+        if (!_isSafeToDepositToAutopilot()) revert UnsafeDepositWindow();
+        
+        // Delete pending deposit first (reentrancy protection)
+        delete pendingDeposits[tokenId];
+        
         // Store locked NFT info
-        lockedNFTs[tokenId] = LockedNFT({owner: msg.sender, votingPower: votingPowerAmount, unlocked: false});
+        lockedNFTs[tokenId] = LockedNFT({
+            owner: pending.owner, 
+            votingPower: pending.votingPower, 
+            unlocked: false
+        });
 
         lockedTokenIds.push(tokenId);
 
         // Update user info - track new participants for FIND-002 fix
-        if (userInfo[msg.sender].totalVotingPower == 0) {
+        if (userInfo[pending.owner].totalVotingPower == 0) {
             participantCount++; // New participant
         }
-        userInfo[msg.sender].totalVotingPower += votingPowerAmount;
+        userInfo[pending.owner].totalVotingPower += pending.votingPower;
 
         // Update total voting power
-        totalVotingPower += votingPowerAmount;
-
-        // Check if it's safe to deposit to Autopilot (avoid left side of special window)
-        // This prevents user confusion when new locks won't be used for current epoch
-        if (!_isSafeToDepositToAutopilot()) revert UnsafeDepositWindow();
+        totalVotingPower += pending.votingPower;
 
         // Deposit NFT to Autopilot for automated vAPR voting
         votingEscrow.approve(address(autopilot), tokenId);
@@ -469,8 +523,31 @@ contract KickoffVoteSalePool is IERC721Receiver {
             revert AutopilotDepositFailed();
         }
 
-        emit VeAEROLocked(msg.sender, tokenId, votingPowerAmount);
+        emit DepositConfirmed(pending.owner, tokenId);
+        emit VeAEROLocked(pending.owner, tokenId, pending.votingPower);
     }
+
+    /// @notice Cancel a pending deposit and return the NFT to the owner
+    /// @param tokenId The veAERO NFT token ID
+    /// @dev Can only be called by the original depositor
+    function cancelDeposit(uint256 tokenId) external nonReentrant {
+        PendingDeposit memory pending = pendingDeposits[tokenId];
+        
+        // Check there's a pending deposit
+        if (pending.owner == address(0)) revert NoPendingDeposit();
+        
+        // Only the original depositor can cancel
+        if (pending.owner != msg.sender) revert NotNFTOwner();
+        
+        // Delete pending deposit first (reentrancy protection)
+        delete pendingDeposits[tokenId];
+        
+        // Return NFT to original owner
+        votingEscrow.safeTransferFrom(address(this), msg.sender, tokenId);
+        
+        emit EmergencyWithdraw(msg.sender, tokenId);
+    }
+
 
     /*//////////////////////////////////////////////////////////////
                     AUTOPILOT CLAIM & WITHDRAW
@@ -882,18 +959,15 @@ contract KickoffVoteSalePool is IERC721Receiver {
         nft.unlocked = true;
         
         // If NFT is still in Autopilot, withdraw it first
-        // Note: withdraw() automatically claims any remaining USDC rewards - send them to user
         if (depositedToAutopilot[tokenId]) {
             // Ensure we're outside Autopilot's special window (dynamic check)
             if (_isInAutopilotSpecialWindow()) revert InAutopilotSpecialWindow();
             
+            // Withdraw and send USDC rewards to user (reverts on failure via direct call)
             uint256 usdcBefore = usdc.balanceOf(address(this));
-            
             autopilot.withdraw(tokenId);
             depositedToAutopilot[tokenId] = false;
             emit WithdrawnFromAutopilot(tokenId);
-            
-            // Send any claimed USDC rewards to the NFT owner
             uint256 usdcAfter = usdc.balanceOf(address(this));
             if (usdcAfter > usdcBefore) {
                 _safeTransferUSDC(msg.sender, usdcAfter - usdcBefore);
@@ -990,26 +1064,12 @@ contract KickoffVoteSalePool is IERC721Receiver {
         nft.unlocked = true;
 
         // If NFT is in Autopilot, try to withdraw it
-        // Note: withdraw() automatically claims USDC rewards - send them to user
-        if (depositedToAutopilot[tokenId]) {
-            uint256 usdcBefore = usdc.balanceOf(address(this));
-            
-            try autopilot.withdraw(tokenId) {
-                depositedToAutopilot[tokenId] = false;
-                emit WithdrawnFromAutopilot(tokenId);
-                
-                // Send any claimed USDC rewards to the NFT owner
-                uint256 usdcAfter = usdc.balanceOf(address(this));
-                if (usdcAfter > usdcBefore) {
-                    _safeTransferUSDC(nftOwner, usdcAfter - usdcBefore);
-                }
-            } catch {
-                // Autopilot withdraw failed (likely during special window)
-                // NFT is marked unlocked but stays in Autopilot
-                // Owner must call retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
-                emit BatchProgress("autopilotWithdrawFailed", tokenId, 0);
-                return; // Don't transfer - NFT still in Autopilot
-            }
+        if (!_tryWithdrawFromAutopilot(tokenId, nftOwner)) {
+            // Autopilot withdraw failed (likely during special window)
+            // NFT is marked unlocked but stays in Autopilot
+            // Owner must call retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
+            emit BatchProgress("autopilotWithdrawFailed", tokenId, 0);
+            return; // Don't transfer - NFT still in Autopilot
         }
 
         // Transfer NFT back to original owner
@@ -1084,24 +1144,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
             nft.unlocked = true;
             
             // If NFT is in Autopilot, try to withdraw it
-            // Note: withdraw() automatically claims USDC rewards - send them to user
-            if (depositedToAutopilot[tokenId]) {
-                uint256 usdcBefore = usdc.balanceOf(address(this));
-                
-                try autopilot.withdraw(tokenId) {
-                    depositedToAutopilot[tokenId] = false;
-                    emit WithdrawnFromAutopilot(tokenId);
-                    
-                    // Send any claimed USDC rewards to the NFT owner
-                    uint256 usdcAfter = usdc.balanceOf(address(this));
-                    if (usdcAfter > usdcBefore) {
-                        _safeTransferUSDC(nftOwner, usdcAfter - usdcBefore);
-                    }
-                } catch {
-                    // Autopilot withdraw failed - NFT marked unlocked but stays in Autopilot
-                    // Owner must call retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
-                }
-            }
+            _tryWithdrawFromAutopilot(tokenId, nftOwner);
             
             // Only transfer if not still in Autopilot
             if (!depositedToAutopilot[tokenId]) {
@@ -1123,21 +1166,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
             
             // Only process if unlocked but still in Autopilot
             if (nft.unlocked && depositedToAutopilot[tokenId]) {
-                address nftOwner = nft.owner;
-                uint256 usdcBefore = usdc.balanceOf(address(this));
-                
-                try autopilot.withdraw(tokenId) {
-                    depositedToAutopilot[tokenId] = false;
-                    emit WithdrawnFromAutopilot(tokenId);
-                    
-                    // Send any claimed USDC rewards to the NFT owner
-                    uint256 usdcAfter = usdc.balanceOf(address(this));
-                    if (usdcAfter > usdcBefore) {
-                        _safeTransferUSDC(nftOwner, usdcAfter - usdcBefore);
-                    }
-                } catch {
-                    // Still failed - will need another retry
-                }
+                _tryWithdrawFromAutopilot(tokenId, nft.owner);
             }
             unchecked { ++i; }
         }
@@ -1350,6 +1379,31 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /*//////////////////////////////////////////////////////////////
                          INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Try to withdraw an NFT from Autopilot and send USDC rewards to recipient
+    /// @param tokenId The NFT token ID
+    /// @param usdcRecipient Address to receive any USDC rewards
+    /// @return success True if withdraw succeeded, false if it failed
+    /// @dev Common logic extracted to reduce bytecode duplication
+    function _tryWithdrawFromAutopilot(uint256 tokenId, address usdcRecipient) internal returns (bool success) {
+        if (!depositedToAutopilot[tokenId]) return true; // Not in Autopilot, nothing to do
+        
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+        
+        try autopilot.withdraw(tokenId) {
+            depositedToAutopilot[tokenId] = false;
+            emit WithdrawnFromAutopilot(tokenId);
+            
+            // Send any claimed USDC rewards to recipient
+            uint256 usdcAfter = usdc.balanceOf(address(this));
+            if (usdcAfter > usdcBefore) {
+                _safeTransferUSDC(usdcRecipient, usdcAfter - usdcBefore);
+            }
+            return true;
+        } catch {
+            return false;
+        }
+    }
 
     /// @notice Update pool state
     function _setState(PoolState newState) internal {

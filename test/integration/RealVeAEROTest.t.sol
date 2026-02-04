@@ -73,6 +73,30 @@ contract RealVeAEROTest is Test {
         pool = KickoffVoteSalePool(factory.createPool(address(projectToken), projectOwner, 10_000_000 ether, minVP, admin));
     }
 
+    /// @notice Helper to perform two-phase veAERO deposit
+    function _lockVeAERO(address owner, uint256 tokenId) internal returns (bool success) {
+        IVotingEscrow ve = IVotingEscrow(VOTING_ESCROW);
+        
+        vm.startPrank(owner);
+        ve.approve(address(pool), tokenId);
+        
+        try pool.depositVeAERO(tokenId) {
+            vm.stopPrank();
+            
+            // Advance to next block
+            vm.roll(block.number + 1);
+            
+            try pool.confirmDeposit(tokenId) {
+                return true;
+            } catch {
+                return false;
+            }
+        } catch {
+            vm.stopPrank();
+            return false;
+        }
+    }
+
     /// @notice Full mainnet emulation with REAL trading and REAL fee claims
     function test_FullFlow_WithRealTrading() public {
         if (block.chainid != 8453) { vm.skip(true); return; }
@@ -124,15 +148,12 @@ contract RealVeAEROTest is Test {
             uint256 vp = ve.balanceOfNFT(NFTS[i]);
             if (vp == 0) continue;
             
-            vm.startPrank(OWNERS[i]);
-            ve.approve(address(pool), NFTS[i]);
-            try pool.lockVeAERO(NFTS[i]) {
+            if (_lockVeAERO(OWNERS[i], NFTS[i])) {
                 totalVP += vp;
                 lockedCount++;
                 console.log("NFT #%d: LOCKED, VP:", NFTS[i]);
                 console.log("  ", vp / 1e18, "veAERO");
-            } catch {}
-            vm.stopPrank();
+            }
         }
         
         vm.roll(block.number + 1);

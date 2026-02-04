@@ -207,20 +207,35 @@ contract KickoffVoteSalePoolTest is Test {
                            LOCK veAERO TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_LockVeAERO() public {
+    function test_DepositAndConfirmVeAERO() public {
         // Activate pool
         vm.prank(admin);
         pool.activate();
 
-        // User1 locks their veAERO
+        // User1 deposits their veAERO (phase 1)
         vm.startPrank(user1);
         votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
+        pool.depositVeAERO(1);
         vm.stopPrank();
 
-        // Verify lock
-        assertEq(pool.totalVotingPower(), USER1_VOTING_POWER);
+        // Verify pending deposit
+        (address pendingOwner, uint256 depositBlock, uint256 pendingVP) = pool.pendingDeposits(1);
+        assertEq(pendingOwner, user1);
+        assertEq(depositBlock, block.number);
+        assertEq(pendingVP, USER1_VOTING_POWER);
+        
+        // NFT should be in pool but not yet confirmed
         assertEq(votingEscrow.ownerOf(1), address(pool));
+        assertEq(pool.totalVotingPower(), 0); // Not yet added to total
+
+        // Advance to next block
+        vm.roll(block.number + 1);
+        
+        // Confirm deposit (phase 2)
+        pool.confirmDeposit(1);
+
+        // Verify lock is complete
+        assertEq(pool.totalVotingPower(), USER1_VOTING_POWER);
 
         (address owner, uint256 votingPower, bool unlocked,) = reader.getLockedNFTInfo(address(pool), 1);
         assertEq(owner, user1);
@@ -230,48 +245,44 @@ contract KickoffVoteSalePoolTest is Test {
         (uint256 userVotingPower, bool claimed) = pool.userInfo(user1);
         assertEq(userVotingPower, USER1_VOTING_POWER);
         assertFalse(claimed);
+        
+        // Pending deposit should be cleared
+        (pendingOwner,,) = pool.pendingDeposits(1);
+        assertEq(pendingOwner, address(0));
     }
 
-    function test_LockVeAERO_MultipleUsers() public {
+    function test_DepositVeAERO_MultipleUsers() public {
         vm.prank(admin);
         pool.activate();
 
-        // User1 locks
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
-
-        // User2 locks
-        vm.startPrank(user2);
-        votingEscrow.approve(address(pool), 2);
-        pool.lockVeAERO(2);
-        vm.stopPrank();
+        // User1 and User2 lock using helper
+        _lockVeAERO(pool, user1, 1);
+        _lockVeAERO(pool, user2, 2);
 
         assertEq(pool.totalVotingPower(), USER1_VOTING_POWER + USER2_VOTING_POWER);
         assertEq(pool.getLockedTokenIds().length, 2);
     }
 
-    function test_LockVeAERO_RevertNotActive() public {
+    function test_DepositVeAERO_RevertNotActive() public {
         vm.startPrank(user1);
         votingEscrow.approve(address(pool), 1);
 
         vm.expectRevert(KickoffVoteSalePool.InvalidState.selector);
-        pool.lockVeAERO(1);
+        pool.depositVeAERO(1);
         vm.stopPrank();
     }
 
-    function test_LockVeAERO_RevertNotOwner() public {
+    function test_DepositVeAERO_RevertNotOwner() public {
         vm.prank(admin);
         pool.activate();
 
         vm.startPrank(user2);
         vm.expectRevert(KickoffVoteSalePool.NotNFTOwner.selector);
-        pool.lockVeAERO(1); // Token 1 belongs to user1
+        pool.depositVeAERO(1); // Token 1 belongs to user1
         vm.stopPrank();
     }
 
-    function test_LockVeAERO_RevertAlreadyVoted() public {
+    function test_DepositVeAERO_RevertAlreadyVoted() public {
         vm.prank(admin);
         pool.activate();
 
@@ -282,11 +293,11 @@ contract KickoffVoteSalePoolTest is Test {
         votingEscrow.approve(address(pool), 1);
 
         vm.expectRevert(KickoffVoteSalePool.AlreadyVotedThisEpoch.selector);
-        pool.lockVeAERO(1);
+        pool.depositVeAERO(1);
         vm.stopPrank();
     }
 
-    function test_LockVeAERO_RevertVotingPowerTooLow() public {
+    function test_DepositVeAERO_RevertVotingPowerTooLow() public {
         // Create a new pool with minVotingPower requirement
         uint256 minVP = 500_000 ether; // 500k veAERO minimum
         
@@ -309,11 +320,11 @@ contract KickoffVoteSalePoolTest is Test {
         votingEscrow.approve(address(poolWithMin), 1);
         
         vm.expectRevert(KickoffVoteSalePool.VotingPowerTooLow.selector);
-        poolWithMin.lockVeAERO(1);
+        poolWithMin.depositVeAERO(1);
         vm.stopPrank();
     }
 
-    function test_LockVeAERO_WithMinVotingPower() public {
+    function test_DepositVeAERO_WithMinVotingPower() public {
         // Create a new pool with minVotingPower requirement that user1 meets
         uint256 minVP = 50_000 ether; // 50k veAERO minimum, user1 has 100k
         
@@ -332,13 +343,60 @@ contract KickoffVoteSalePoolTest is Test {
         poolWithMin.activate();
         
         // user1 has 100_000 ether VP which is >= 50_000 ether minimum
-        vm.startPrank(user1);
-        votingEscrow.approve(address(poolWithMin), 1);
-        poolWithMin.lockVeAERO(1); // Should succeed
-        vm.stopPrank();
+        // Use helper for two-phase deposit
+        _lockVeAERO(poolWithMin, user1, 1);
         
         assertEq(poolWithMin.totalVotingPower(), USER1_VOTING_POWER);
         assertEq(poolWithMin.minVotingPower(), minVP);
+    }
+
+    function test_ConfirmDeposit_RevertSameBlock() public {
+        vm.prank(admin);
+        pool.activate();
+
+        vm.startPrank(user1);
+        votingEscrow.approve(address(pool), 1);
+        pool.depositVeAERO(1);
+        vm.stopPrank();
+
+        // Try to confirm in the same block - should revert
+        vm.expectRevert(KickoffVoteSalePool.SameBlockDeposit.selector);
+        pool.confirmDeposit(1);
+    }
+
+    function test_CancelDeposit() public {
+        vm.prank(admin);
+        pool.activate();
+
+        vm.startPrank(user1);
+        votingEscrow.approve(address(pool), 1);
+        pool.depositVeAERO(1);
+        
+        // Cancel the pending deposit
+        pool.cancelDeposit(1);
+        vm.stopPrank();
+
+        // NFT should be returned to user
+        assertEq(votingEscrow.ownerOf(1), user1);
+        
+        // Pending deposit should be cleared
+        (address pendingOwner,,) = pool.pendingDeposits(1);
+        assertEq(pendingOwner, address(0));
+    }
+
+    function test_CancelDeposit_RevertNotOwner() public {
+        vm.prank(admin);
+        pool.activate();
+
+        vm.startPrank(user1);
+        votingEscrow.approve(address(pool), 1);
+        pool.depositVeAERO(1);
+        vm.stopPrank();
+
+        // User2 tries to cancel user1's deposit
+        vm.prank(user2);
+        vm.expectRevert(KickoffVoteSalePool.NotNFTOwner.selector);
+        pool.cancelDeposit(1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -350,10 +408,7 @@ contract KickoffVoteSalePoolTest is Test {
         vm.prank(admin);
         pool.activate();
 
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
+        _lockVeAERO(pool, user1, 1);
 
         // State should be Active
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Active));
@@ -377,10 +432,7 @@ contract KickoffVoteSalePoolTest is Test {
         vm.prank(admin);
         pool.activate();
 
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
+        _lockVeAERO(pool, user1, 1);
 
         // Advance to next epoch (rewards are claimable only after epoch ends)
         // checkStateTransition modifier will auto-transition from Active to Voting
@@ -473,10 +525,7 @@ contract KickoffVoteSalePoolTest is Test {
         vm.prank(admin);
         pool.activate();
 
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
+        _lockVeAERO(pool, user1, 1);
 
         assertEq(votingEscrow.ownerOf(1), address(pool));
 
@@ -490,15 +539,8 @@ contract KickoffVoteSalePoolTest is Test {
         vm.prank(admin);
         pool.activate();
 
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
-
-        vm.startPrank(user2);
-        votingEscrow.approve(address(pool), 2);
-        pool.lockVeAERO(2);
-        vm.stopPrank();
+        _lockVeAERO(pool, user1, 1);
+        _lockVeAERO(pool, user2, 2);
 
         vm.prank(admin);
         pool.emergencyWithdrawAllNFTs();
@@ -550,21 +592,29 @@ contract KickoffVoteSalePoolTest is Test {
                             HELPER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Helper to perform two-phase veAERO deposit
+    /// @dev Handles depositVeAERO + block advance + confirmDeposit
+    function _lockVeAERO(KickoffVoteSalePool _pool, address user, uint256 tokenId) internal {
+        vm.startPrank(user);
+        votingEscrow.approve(address(_pool), tokenId);
+        _pool.depositVeAERO(tokenId);
+        vm.stopPrank();
+        
+        // Advance to next block (required because Aerodrome resets VP on same-block ownership change)
+        vm.roll(block.number + 1);
+        
+        // Anyone can confirm the deposit in the next block
+        _pool.confirmDeposit(tokenId);
+    }
+
     function _setupAndFinalize() internal {
         // Activate
         vm.prank(admin);
         pool.activate();
 
-        // Lock NFTs
-        vm.startPrank(user1);
-        votingEscrow.approve(address(pool), 1);
-        pool.lockVeAERO(1);
-        vm.stopPrank();
-
-        vm.startPrank(user2);
-        votingEscrow.approve(address(pool), 2);
-        pool.lockVeAERO(2);
-        vm.stopPrank();
+        // Lock NFTs using two-phase flow
+        _lockVeAERO(pool, user1, 1);
+        _lockVeAERO(pool, user2, 2);
 
         // Advance to next epoch + past special window
         // checkStateTransition modifier will auto-transition Active -> Voting
