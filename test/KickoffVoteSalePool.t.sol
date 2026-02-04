@@ -72,6 +72,8 @@ contract KickoffVoteSalePoolTest is Test {
         // Mock Autopilot's deposit_validator and minimum_lock_amount
         vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSignature("deposit_validator()"), abi.encode(AUTOPILOT_DEPOSIT_VALIDATOR));
         vm.mockCall(AUTOPILOT_DEPOSIT_VALIDATOR, abi.encodeWithSignature("minimum_lock_amount()"), abi.encode(1000 ether));
+        // Mock getMinDepositAmount to return global minimum (non-whitelisted users)
+        vm.mockCall(AUTOPILOT_DEPOSIT_VALIDATOR, abi.encodeWithSignature("getMinDepositAmount(address)"), abi.encode(1000 ether));
         
         // Mock Autopilot's epoch info for dynamic lockingDeadline
         // Current epoch (id=1): Thursday-based epochs
@@ -147,6 +149,7 @@ contract KickoffVoteSalePoolTest is Test {
         // Re-mock deposit_validator
         vm.mockCall(AUTOPILOT_ADDRESS, abi.encodeWithSignature("deposit_validator()"), abi.encode(AUTOPILOT_DEPOSIT_VALIDATOR));
         vm.mockCall(AUTOPILOT_DEPOSIT_VALIDATOR, abi.encodeWithSignature("minimum_lock_amount()"), abi.encode(1000 ether));
+        vm.mockCall(AUTOPILOT_DEPOSIT_VALIDATOR, abi.encodeWithSignature("getMinDepositAmount(address)"), abi.encode(1000 ether));
         
         // Calculate new epoch info based on current block.timestamp
         uint256 currentEpochStart = (block.timestamp / 1 weeks) * 1 weeks;

@@ -9,7 +9,7 @@ import {IRouter} from "./interfaces/IRouter.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IWETH} from "./interfaces/IWETH.sol";
 import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
-import {IAutopilot} from "./interfaces/IAutopilot.sol";
+import {IAutopilot, IAutopilotDepositValidator} from "./interfaces/IAutopilot.sol";
 import {INonfungiblePositionManager} from "./interfaces/INonfungiblePositionManager.sol";
 import {ICLFactory} from "./interfaces/ICLFactory.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -425,8 +425,10 @@ contract KickoffVoteSalePool is IERC721Receiver {
         // Get voting power
         uint256 votingPowerAmount = votingEscrow.balanceOfNFT(tokenId);
         
-        // Check minimum voting power (factory ensures minVotingPower >= MIN_AUTOPILOT_VOTING_POWER)
-        if (votingPowerAmount < minVotingPower) {
+        // Check minimum voting power with whitelist support
+        // Whitelisted users can lock with lower VP, others use pool's minVotingPower
+        uint256 effectiveMin = _getEffectiveMinVotingPower(msg.sender);
+        if (votingPowerAmount < effectiveMin) {
             revert VotingPowerTooLow();
         }
 
@@ -514,6 +516,40 @@ contract KickoffVoteSalePool is IERC721Receiver {
         
         // Safe to deposit if we're NOT in this window
         return !(block.timestamp > windowStartsAt && block.timestamp <= windowEndsAt);
+    }
+
+    /// @notice Get effective minimum voting power for a user
+    /// @dev Whitelisted users in Autopilot can lock with lower VP
+    ///      Non-whitelisted users use pool's minVotingPower
+    ///      Falls back to minVotingPower if Autopilot calls fail
+    /// @param user The user address to check
+    /// @return The effective minimum voting power for this user
+    function _getEffectiveMinVotingPower(address user) internal view returns (uint256) {
+        // Default to pool's configured minimum
+        uint256 effectiveMin = minVotingPower;
+        
+        // Try to check if user is whitelisted in Autopilot with lower minimum
+        try autopilot.deposit_validator() returns (address validator) {
+            if (validator != address(0)) {
+                try IAutopilotDepositValidator(validator).getMinDepositAmount(user) returns (uint256 whitelistMin) {
+                    try IAutopilotDepositValidator(validator).minimum_lock_amount() returns (uint256 globalMin) {
+                        // User is whitelisted if their min is lower than global
+                        if (whitelistMin < globalMin) {
+                            effectiveMin = whitelistMin;
+                        }
+                        // Otherwise, use pool's minVotingPower (already set as default)
+                    } catch {
+                        // minimum_lock_amount() failed, use pool's min
+                    }
+                } catch {
+                    // getMinDepositAmount() failed, use pool's min
+                }
+            }
+        } catch {
+            // deposit_validator() failed, use pool's min
+        }
+        
+        return effectiveMin;
     }
 
     /// @notice Start claiming USDC rewards from Autopilot in batches

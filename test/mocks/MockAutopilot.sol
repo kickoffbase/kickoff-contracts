@@ -1,12 +1,33 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @title MockDepositValidator
+/// @notice Mock deposit validator for whitelist testing
+contract MockDepositValidator {
+    uint256 public minimum_lock_amount = 1000e18;
+    mapping(address => uint256) public whitelist_min_amount;
+    
+    function setMinimumLockAmount(uint256 _amount) external {
+        minimum_lock_amount = _amount;
+    }
+    
+    function setWhitelistMin(address _depositor, uint256 _amount) external {
+        whitelist_min_amount[_depositor] = _amount;
+    }
+    
+    function getMinDepositAmount(address _depositor) external view returns (uint256) {
+        uint256 wl_min = whitelist_min_amount[_depositor];
+        return wl_min > 0 ? wl_min : minimum_lock_amount;
+    }
+}
+
 /// @title MockAutopilot
 /// @notice Mock contract for Autopilot PermanentLocksPoolV1
 contract MockAutopilot {
     mapping(uint256 => bool) public deposited;
     mapping(uint256 => uint256) public pendingRewards;
     address public rewards_token;
+    MockDepositValidator public depositValidator;
     
     // Fixed epoch times for testing (set during construction)
     uint256 public currentEpochStart;
@@ -14,6 +35,7 @@ contract MockAutopilot {
     
     constructor(address _rewardsToken) {
         rewards_token = _rewardsToken;
+        depositValidator = new MockDepositValidator();
         // Set epoch times based on Thursday-based epochs
         // Find current epoch start (Thursday 00:00 UTC)
         currentEpochStart = (block.timestamp / 1 weeks) * 1 weeks;
@@ -103,5 +125,19 @@ contract MockAutopilot {
             voting_power: 100000e18,
             postponed_rewards: 0
         });
+    }
+    
+    function deposit_validator() external view returns (address) {
+        return address(depositValidator);
+    }
+    
+    /// @notice Set whitelist minimum for an address (for testing)
+    function setWhitelistMin(address _depositor, uint256 _amount) external {
+        depositValidator.setWhitelistMin(_depositor, _amount);
+    }
+    
+    /// @notice Set global minimum lock amount (for testing)
+    function setMinimumLockAmount(uint256 _amount) external {
+        depositValidator.setMinimumLockAmount(_amount);
     }
 }

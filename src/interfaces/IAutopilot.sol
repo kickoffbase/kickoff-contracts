@@ -93,4 +93,10 @@ interface IAutopilotDepositValidator {
     /// @notice Returns the minimum lock amount required for deposits
     /// @return The minimum veAERO voting power required
     function minimum_lock_amount() external view returns (uint256);
+    
+    /// @notice Returns the minimum deposit amount for a specific address
+    /// @dev Returns whitelist minimum if set, otherwise global minimum
+    /// @param _depositor Address to check
+    /// @return Minimum deposit amount for this address
+    function getMinDepositAmount(address _depositor) external view returns (uint256);
 }
