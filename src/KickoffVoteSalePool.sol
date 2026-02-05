@@ -454,14 +454,19 @@ contract KickoffVoteSalePool is IERC721Receiver {
             revert VotingPowerTooLow();
         }
 
-        // Make lock permanent if not already (required for Autopilot deposit)
+        // Check if lock is permanent (required for Autopilot deposit)
+        // Must check BEFORE transfer, but lockPermanent must be called AFTER
+        // because only owner can call lockPermanent
         IVotingEscrow.LockedBalance memory lockInfo = votingEscrow.locked(tokenId);
-        if (!lockInfo.isPermanent) {
+        bool needsLockPermanent = !lockInfo.isPermanent;
+
+        // Transfer NFT to this contract first (user must have approved)
+        votingEscrow.safeTransferFrom(msg.sender, address(this), tokenId);
+
+        // Make lock permanent if needed (now pool is owner and can call this)
+        if (needsLockPermanent) {
             votingEscrow.lockPermanent(tokenId);
         }
-
-        // Transfer NFT to this contract
-        votingEscrow.safeTransferFrom(msg.sender, address(this), tokenId);
 
         // Store as pending deposit - will be confirmed in next block
         pendingDeposits[tokenId] = PendingDeposit({
@@ -1078,17 +1083,6 @@ contract KickoffVoteSalePool is IERC721Receiver {
         emit EmergencyWithdraw(nftOwner, tokenId);
     }
 
-    /// @notice Emergency withdraw all NFTs in one transaction (for small numbers)
-    function emergencyWithdrawAllNFTs() external onlyOwner {
-        if (batchInProgress) revert BatchInProgress();
-        
-        uint256 length = lockedTokenIds.length;
-        for (uint256 i = 0; i < length;) {
-            _emergencyWithdrawSingle(lockedTokenIds[i]);
-            unchecked { ++i; }
-        }
-    }
-
     /// @notice Emergency withdraw NFTs in batches
     /// @param batchSize Number of NFTs to process
     function emergencyWithdrawBatch(uint256 batchSize) external onlyOwner {
@@ -1160,6 +1154,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @dev After successful retry, users can call claimUnlockedNFT() to get their NFTs
     /// @dev Any USDC rewards from withdraw are sent to the NFT owner
     function retryAutopilotWithdraw(uint256[] calldata tokenIds) external onlyOwner {
+        if (tokenIds.length > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
+        
         for (uint256 i = 0; i < tokenIds.length;) {
             uint256 tokenId = tokenIds[i];
             LockedNFT storage nft = lockedNFTs[tokenId];

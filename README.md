@@ -102,9 +102,10 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 
 ### Vote-Sale
 - **Autopilot integration** for automated vAPR optimization
+- **Two-phase deposit** (depositVeAERO + confirmDeposit) to handle Aerodrome's same-block voting power reset
 - **USDC rewards** automatically converted to WETH for LP creation
 - **Slipstream CL positions** (1% fee tier, full-range) for liquidity
-- **Batch processing** for 100+ veAERO NFTs
+- **Batch processing** for 100+ veAERO NFTs with gas limits (MAX_BATCH_SIZE = 50)
 - **Slippage protection** for swaps and liquidity
 - **Reentrancy guards** on all critical functions
 - **Emergency withdraw** with Autopilot retry mechanisms
@@ -334,12 +335,18 @@ pool.cancelPool()                            // Cancel and return project tokens
 #### For veAERO Holders
 
 ```solidity
-// 1. Lock veAERO (must have >= 400 veAERO voting power)
+// 1. Deposit veAERO (two-phase flow, must have >= 400 veAERO voting power)
 // WARNING: NFT will be permanently locked in Autopilot (4-year max lock)
 veAERO.approve(poolAddress, tokenId)
-pool.lockVeAERO(tokenId)  // Auto-deposits to Autopilot
+pool.depositVeAERO(tokenId)  // Phase 1: Transfer NFT to pool
 
-// 2. Unlock NFT & Claim (after pool is Completed)
+// 2. Confirm deposit (must be in NEXT block - required by Aerodrome)
+pool.confirmDeposit(tokenId)  // Phase 2: Deposit to Autopilot (can be called by anyone)
+
+// Alternative: Cancel deposit if you changed your mind
+pool.cancelDeposit(tokenId)  // Returns NFT to original owner
+
+// 3. Unlock NFT & Claim (after pool is Completed)
 pool.unlockVeAERO(tokenId)  // Auto-withdraws from Autopilot and returns NFT
 pool.claimProjectTokens()   // Claim project tokens
 
@@ -396,7 +403,9 @@ address rewardsToken = reader.getAutopilotRewardsToken();
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  User locks veNFT → Deposited to Autopilot (permanent lock)      │
+│  User deposits veNFT (depositVeAERO) → NFT in pool contract       │
+│                              ↓                                    │
+│  User confirms (confirmDeposit in next block) → Autopilot deposit │
 │                              ↓                                    │
 │  Autopilot bots vote for optimal gauges → Best vAPR              │
 │                              ↓                                    │
@@ -432,6 +441,12 @@ pool.completeAutopilotFinalization();
 ### User Functions (Autopilot Flow)
 
 ```solidity
+// Deposit (two-phase, during Active state):
+veAERO.approve(poolAddress, tokenId);
+pool.depositVeAERO(tokenId);   // Phase 1: Transfer to pool
+// ... wait for next block ...
+pool.confirmDeposit(tokenId);  // Phase 2: Deposit to Autopilot
+
 // After pool is Completed:
 pool.unlockVeAERO(tokenId);  // Auto-withdraws from Autopilot and returns NFT
 pool.claimProjectTokens();   // Claim your project tokens
@@ -479,6 +494,8 @@ Liquidity is added as **full-range 1% fee tier** CL position for maximum coverag
 - **LPLocker deployer check** - only deployer can set factory
 - **Paginated view functions** - prevents gas DoS on large datasets
 - **Autopilot retry mechanism** - handles stuck NFTs during special window
+- **Two-phase deposit** - bypasses Aerodrome's same-block voting power reset protection
+- **Gas limit protection** - MAX_BATCH_SIZE=50 on all batch operations
 
 ## License
 

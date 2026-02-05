@@ -535,7 +535,7 @@ contract KickoffVoteSalePoolTest is Test {
         assertEq(votingEscrow.ownerOf(1), user1);
     }
 
-    function test_EmergencyWithdrawAllNFTs() public {
+    function test_EmergencyWithdrawBatch() public {
         vm.prank(admin);
         pool.activate();
 
@@ -543,7 +543,7 @@ contract KickoffVoteSalePoolTest is Test {
         _lockVeAERO(pool, user2, 2);
 
         vm.prank(admin);
-        pool.emergencyWithdrawAllNFTs();
+        pool.emergencyWithdrawBatch(50); // Process up to 50 NFTs
 
         assertEq(votingEscrow.ownerOf(1), user1);
         assertEq(votingEscrow.ownerOf(2), user2);

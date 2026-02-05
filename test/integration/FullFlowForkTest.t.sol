@@ -748,7 +748,7 @@ contract FullFlowForkTest is Test {
             vm.warp(epochEnd + 2 hours);
             
             vm.prank(admin);
-            pool.emergencyWithdrawAllNFTs();
+            pool.emergencyWithdrawBatch(50); // Process up to 50 NFTs
         }
         
         // Project token balance before cancel
