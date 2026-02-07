@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {KickoffFactory} from "../../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../../src/KickoffVoteSalePool.sol";
+import {CLPriceArbitrageur} from "../../src/CLPriceArbitrageur.sol";
+import {VoteSalePoolDeployer} from "../../src/VoteSalePoolDeployer.sol";
 import {LPLocker} from "../../src/LPLocker.sol";
 import {IVotingEscrow} from "../../src/interfaces/IVotingEscrow.sol";
 import {IVoter} from "../../src/interfaces/IVoter.sol";
@@ -50,8 +52,11 @@ contract FullFlowTest is Test {
         projectToken = address(new MockProjectToken());
         MockProjectToken(projectToken).mint(admin, TOTAL_ALLOCATION);
 
-        // Deploy factory (this contract becomes owner)
-        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH);
+        // Deploy shared helper contracts and factory (this contract becomes owner)
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur();
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer();
+        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH, address(arbitrageur), address(poolDeployer));
+        poolDeployer.setFactory(address(factory));
         lpLocker = factory.lpLocker();
 
         // Admin approves tokens

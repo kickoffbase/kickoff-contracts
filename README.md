@@ -34,17 +34,24 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 
 ┌─────────────────────────────────────────────────────────────────┐
 │                        KickoffFactory                           │
-│  - Creates Vote-Sale Pools                                      │
+│  - Creates Vote-Sale Pools (via VoteSalePoolDeployer)           │
 │  - Manages global configuration                                 │
 └─────────────────────────────────────────────────────────────────┘
+           │                                    │
+           ▼                                    ▼
+┌───────────────────────────┐    ┌─────────────────────────────────┐
+│  VoteSalePoolDeployer     │    │     CLPriceArbitrageur          │
+│  - Deploys pool instances │    │  - Fixes front-run pool prices  │
+│  - EIP-170 bytecode split │    │  - Dust arbitrage via Slipstream│
+└───────────────────────────┘    └─────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    KickoffVoteSalePool                          │
-│  - Accepts veAERO NFT locks                                     │
-│  - Casts votes on Aerodrome                                     │
-│  - Claims & converts rewards to WETH                            │
-│  - Creates PROJECT/WETH liquidity                               │
+│  - Accepts veAERO NFT locks (two-phase deposit)                 │
+│  - Deposits to Autopilot for vAPR optimization                  │
+│  - Claims & converts USDC rewards to WETH                       │
+│  - Creates PROJECT/WETH Slipstream CL position                  │
 │  - Distributes project tokens to participants                   │
 └─────────────────────────────────────────────────────────────────┘
            │                                    │
@@ -74,9 +81,12 @@ Kickoff enables projects to bootstrap liquidity by leveraging veAERO voting powe
 |----------|-------------|
 | `KickoffFactory` | Factory for creating Vote-Sale pools |
 | `KickoffVoteSalePool` | Main pool contract for vote-sale mechanism |
+| `VoteSalePoolDeployer` | Deploys pool instances on behalf of factory (EIP-170 bytecode split) |
+| `CLPriceArbitrageur` | Shared contract for fixing front-run CL pool prices via dust arbitrage |
 | `KickoffPoolReader` | Read-only contract for pool state queries and reward calculations |
 | `LPLocker` | Permanently locks Slipstream CL positions, distributes trading fees |
 | `EpochLib` | Library for Aerodrome epoch calculations |
+| `TickMathLib` | Library for precise tick ↔ sqrtPriceX96 conversions (Uniswap V3 port) |
 
 ### Interfaces
 
@@ -159,7 +169,7 @@ BASESCAN_API_KEY=your_api_key
 
 ### Deploy All Contracts
 
-Deploys: `KickoffFactory`, `LPLocker`, `KickoffPoolReader`, `TokenVesting`, `ProjectTokenFactory`
+Deploys: `CLPriceArbitrageur`, `VoteSalePoolDeployer`, `KickoffFactory`, `LPLocker`, `KickoffPoolReader`, `TokenVesting`, `ProjectTokenFactory`
 
 ```bash
 source .env
@@ -187,7 +197,7 @@ forge script script/Deploy.s.sol:DeployTokenFactoryOnly \
 
 ### Deploy Only Vote-Sale
 
-Deploys: `KickoffFactory`, `LPLocker`, `KickoffPoolReader`
+Deploys: `CLPriceArbitrageur`, `VoteSalePoolDeployer`, `KickoffFactory`, `LPLocker`, `KickoffPoolReader`
 
 ```bash
 source .env
@@ -219,6 +229,8 @@ Replace `https://sepolia.base.org` with `https://mainnet.base.org`
 
 | Contract | Address | Basescan |
 |----------|---------|----------|
+| **CLPriceArbitrageur** | `TBD` | TBD |
+| **VoteSalePoolDeployer** | `TBD` | TBD |
 | **KickoffFactory** | `TBD` | TBD |
 | **LPLocker** | `TBD` | TBD |
 | **KickoffPoolReader** | `TBD` | TBD |
@@ -322,7 +334,7 @@ pool.activate()
 // 4. Finalize with Autopilot flow
 pool.startClaimRewardsFromAutopilot(batchSize)
 pool.continueClaimRewardsFromAutopilot(batchSize)  // repeat until done
-pool.convertUSDCtoWETH()
+pool.convertUSDCtoWETH()  // retryable: if swap fails, adjust slippage and call again
 pool.completeAutopilotFinalization()
 
 // Emergency functions (if needed)
@@ -434,7 +446,7 @@ address rewardsToken = reader.getAutopilotRewardsToken();
 // After epoch ends and special window passes:
 pool.startClaimRewardsFromAutopilot(batchSize);
 pool.continueClaimRewardsFromAutopilot(batchSize);  // repeat until done
-pool.convertUSDCtoWETH();
+pool.convertUSDCtoWETH();  // retryable: adjust slippage via setSwapSlippage() and call again if needed
 pool.completeAutopilotFinalization();
 ```
 
@@ -496,6 +508,8 @@ Liquidity is added as **full-range 1% fee tier** CL position for maximum coverag
 - **Autopilot retry mechanism** - handles stuck NFTs during special window
 - **Two-phase deposit** - bypasses Aerodrome's same-block voting power reset protection
 - **Gas limit protection** - MAX_BATCH_SIZE=50 on all batch operations
+- **Front-run protection** - CLPriceArbitrageur corrects manipulated CL pool prices via dust arbitrage
+- **Retryable USDC conversion** - `convertUSDCtoWETH()` can be called multiple times with adjusted slippage
 
 ## License
 

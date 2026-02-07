@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Script.sol";
 import {KickoffFactory} from "../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../src/KickoffVoteSalePool.sol";
+import {CLPriceArbitrageur} from "../src/CLPriceArbitrageur.sol";
+import {VoteSalePoolDeployer} from "../src/VoteSalePoolDeployer.sol";
 import {KickoffPoolReader} from "../src/KickoffPoolReader.sol";
 import {LPLocker} from "../src/LPLocker.sol";
 import {TokenVesting} from "../src/TokenVesting.sol";
@@ -88,16 +90,29 @@ contract Deploy is Script {
         // ============ Part 1: Vote-Sale Infrastructure ============
         console.log("--- Deploying Vote-Sale Infrastructure ---");
         
+        // 1.0 Deploy shared helper contracts
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur();
+        console.log("CLPriceArbitrageur deployed:", address(arbitrageur));
+        
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer();
+        console.log("VoteSalePoolDeployer deployed:", address(poolDeployer));
+
         // 1.1 KickoffFactory (deploys LPLocker in constructor)
         KickoffFactory kickoffFactory = new KickoffFactory(
             AUTOPILOT,
             VOTING_ESCROW,
             VOTER,
             ROUTER,
-            WETH
+            WETH,
+            address(arbitrageur),
+            address(poolDeployer)
         );
         console.log("KickoffFactory deployed:", address(kickoffFactory));
         console.log("LPLocker deployed:", address(kickoffFactory.lpLocker()));
+
+        // 1.1.1 Link pool deployer to factory (one-time access control)
+        poolDeployer.setFactory(address(kickoffFactory));
+        console.log("VoteSalePoolDeployer linked to factory");
         
         // 1.2 KickoffPoolReader (view functions for pools)
         KickoffPoolReader poolReader = new KickoffPoolReader();
@@ -139,6 +154,8 @@ contract Deploy is Script {
         console.log("");
         console.log("Vote-Sale Contracts:");
         console.log("  KickoffFactory:", address(kickoffFactory));
+        console.log("  VoteSalePoolDeployer:", address(kickoffFactory.poolDeployer()));
+        console.log("  CLPriceArbitrageur:", kickoffFactory.priceArbitrageur());
         console.log("  LPLocker:", address(kickoffFactory.lpLocker()));
         console.log("  KickoffPoolReader:", address(poolReader));
         console.log("");
@@ -227,14 +244,23 @@ contract DeployVoteSaleOnly is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
+        // Deploy shared helper contracts
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur();
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer();
+
         // Deploy Factory (includes LPLocker)
         KickoffFactory factory = new KickoffFactory(
             AUTOPILOT,
             VOTING_ESCROW,
             VOTER,
             ROUTER,
-            WETH
+            WETH,
+            address(arbitrageur),
+            address(poolDeployer)
         );
+
+        // Link pool deployer to factory
+        poolDeployer.setFactory(address(factory));
         
         // Deploy Reader
         KickoffPoolReader reader = new KickoffPoolReader();
@@ -242,6 +268,8 @@ contract DeployVoteSaleOnly is Script {
         vm.stopBroadcast();
 
         console.log("");
+        console.log("CLPriceArbitrageur:", address(arbitrageur));
+        console.log("VoteSalePoolDeployer:", address(poolDeployer));
         console.log("KickoffFactory:", address(factory));
         console.log("LPLocker:", address(factory.lpLocker()));
         console.log("KickoffPoolReader:", address(reader));
@@ -400,13 +428,18 @@ contract DeployWithSalt is Script {
         vm.startBroadcast(deployerPrivateKey);
 
         // Vote-Sale Infrastructure
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur{salt: salt}();
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer{salt: salt}();
         KickoffFactory kickoffFactory = new KickoffFactory{salt: salt}(
             AUTOPILOT,
             VOTING_ESCROW,
             VOTER,
             ROUTER,
-            WETH
+            WETH,
+            address(arbitrageur),
+            address(poolDeployer)
         );
+        poolDeployer.setFactory(address(kickoffFactory));
         KickoffPoolReader reader = new KickoffPoolReader{salt: salt}();
 
         // Token Factory Infrastructure
@@ -417,6 +450,8 @@ contract DeployWithSalt is Script {
         vm.stopBroadcast();
 
         console.log("");
+        console.log("CLPriceArbitrageur:", address(arbitrageur));
+        console.log("VoteSalePoolDeployer:", address(poolDeployer));
         console.log("KickoffFactory:", address(kickoffFactory));
         console.log("LPLocker:", address(kickoffFactory.lpLocker()));
         console.log("KickoffPoolReader:", address(reader));

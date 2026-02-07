@@ -12,6 +12,8 @@ import {IERC721Receiver} from "./interfaces/IERC721Receiver.sol";
 import {IAutopilot, IAutopilotDepositValidator} from "./interfaces/IAutopilot.sol";
 import {INonfungiblePositionManager} from "./interfaces/INonfungiblePositionManager.sol";
 import {ICLFactory} from "./interfaces/ICLFactory.sol";
+import {ICLPool} from "./interfaces/ICLPool.sol";
+import {CLPriceArbitrageur} from "./CLPriceArbitrageur.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title KickoffVoteSalePool
@@ -77,6 +79,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
     error NoPendingDeposit();
     error SameBlockDeposit();
     error AlreadyPending();
+    error PoolIsCompleted();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -175,6 +178,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice WETH contract
     IWETH public immutable weth;
+
+    /// @notice Price arbitrageur contract (shared, for fixing front-run pool prices)
+    CLPriceArbitrageur public immutable priceArbitrageur;
 
     /// @notice Protocol owner (for emergency functions)
     address public owner;
@@ -348,7 +354,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
         address _votingEscrow,
         address _voter,
         address _router,
-        address _weth
+        address _weth,
+        address _priceArbitrageur
     ) {
         projectToken = _projectToken;
         admin = _admin;
@@ -363,6 +370,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
         voter = IVoter(_voter);
         router = IRouter(_router);
         weth = IWETH(_weth);
+        priceArbitrageur = CLPriceArbitrageur(_priceArbitrageur);
 
         owner = _admin;
         state = PoolState.Inactive;
@@ -729,6 +737,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Convert USDC rewards to WETH
     /// @dev Called after claiming from Autopilot, swaps all USDC to WETH
+    /// @dev Can be called multiple times if swap fails — admin can adjust slippage and retry
+    /// @dev Only advances to AddingLiquidity when all claimed USDC is converted
     function convertUSDCtoWETH() external nonReentrant onlyAdmin inState(PoolState.Finalizing) {
         if (batchInProgress) revert BatchInProgress();
         if (finalizeStep != FinalizeStep.ConvertingToWETH) revert InvalidState();
@@ -767,7 +777,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
                     if (minOut > 0) {
                         try router.swapExactTokensForTokens(usdcBalance, minOut, routes, address(this), deadline) {
                         } catch {
-                            // USDC stays in contract for manual handling
+                            // USDC stays in contract — admin can retry with different slippage
                         }
                     }
                 }
@@ -779,7 +789,12 @@ contract KickoffVoteSalePool is IERC721Receiver {
         totalClaimedRewards = wethAfter - wethBeforeFinalization;
         wethCollected = totalClaimedRewards;
         
-        finalizeStep = FinalizeStep.AddingLiquidity;
+        // M-02 fix: Only advance if all claimed USDC was converted (or no new USDC was claimed)
+        // If USDC remains above pre-finalization level, admin can retry with adjusted slippage
+        uint256 remainingUsdc = usdc.balanceOf(address(this));
+        if (remainingUsdc <= usdcBeforeFinalization) {
+            finalizeStep = FinalizeStep.AddingLiquidity;
+        }
     }
 
     /// @notice Complete the Autopilot finalization by adding liquidity
@@ -851,6 +866,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Add liquidity as Slipstream CL position (1% fee tier, full-range)
     /// @dev Creates or adds to a CL pool with full-range position for max coverage
+    /// @dev If pool was front-run by attacker, performs dust arbitrage to correct price
     /// @dev #8: Only uses tracked claimed rewards, not external WETH donations
     function _addLiquidity() internal {
         // #8: Use tracked claimed rewards, not balanceOf (prevents external WETH griefing)
@@ -865,21 +881,49 @@ contract KickoffVoteSalePool is IERC721Receiver {
                 ? (projectToken, wethAddr, liquidityAllocation, wethToUse)
                 : (wethAddr, projectToken, wethToUse, liquidityAllocation);
 
+        // Calculate sqrtPriceX96 for initial price (token1/token0)
+        // price = amount1 / amount0, sqrtPriceX96 = sqrt(price) * 2^96
+        uint160 sqrtPriceX96 = _calculateSqrtPriceX96(amount0, amount1);
+
+        // Check if pool was already created (front-run protection)
+        // If pool exists, fix its price via dust arbitrage and set sqrtPriceX96 to 0
+        // to avoid NonfungiblePositionManager.mint() calling createPool() which would revert
+        bool poolExists;
+        address existingPool = clFactory.getPool(token0, token1, CL_TICK_SPACING);
+        if (existingPool != address(0)) {
+            poolExists = true;
+            uint256 dustAmount = priceArbitrageur.DUST_AMOUNT();
+            (uint160 currentSqrtPrice,,,,,) = ICLPool(existingPool).slot0();
+            if (currentSqrtPrice != sqrtPriceX96) {
+                // Approve dust tokens to arbitrageur, which will transferFrom them
+                IERC20(token0).approve(address(priceArbitrageur), dustAmount);
+                IERC20(token1).approve(address(priceArbitrageur), dustAmount);
+                priceArbitrageur.fixPoolPrice(existingPool, token0, token1, sqrtPriceX96, CL_TICK_SPACING);
+                // Reset approvals
+                IERC20(token0).approve(address(priceArbitrageur), 0);
+                IERC20(token1).approve(address(priceArbitrageur), 0);
+            }
+            // Subtract dust reserve from amounts to account for tokens spent on arbitrage
+            // fixPoolPrice uses at most DUST_AMOUNT of each token for the concentrated
+            // position + swap. Subtracting ensures mint() won't fail due to insufficient balance.
+            if (amount0 > dustAmount) amount0 -= dustAmount;
+            if (amount1 > dustAmount) amount1 -= dustAmount;
+        }
+
         // Approve position manager (reset to 0 first for tokens like USDT that require it)
         IERC20(token0).approve(address(clPositionManager), 0);
         IERC20(token0).approve(address(clPositionManager), amount0);
         IERC20(token1).approve(address(clPositionManager), 0);
         IERC20(token1).approve(address(clPositionManager), amount1);
 
-        // Calculate sqrtPriceX96 for initial price (token1/token0)
-        // price = amount1 / amount0, sqrtPriceX96 = sqrt(price) * 2^96
-        uint160 sqrtPriceX96 = _calculateSqrtPriceX96(amount0, amount1);
-
         // Calculate minimum amounts with slippage tolerance
         uint256 amount0Min = (amount0 * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
         uint256 amount1Min = (amount1 * (BPS_DENOMINATOR - liquiditySlippageBps)) / BPS_DENOMINATOR;
 
         // Mint full-range CL position with 1% fee tier
+        // CRITICAL: sqrtPriceX96 must be 0 when pool already exists, because Aerodrome's
+        // NonfungiblePositionManager.mint() calls createPool() when sqrtPriceX96 != 0,
+        // which reverts if the pool already exists
         INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
             token0: token0,
             token1: token1,
@@ -892,7 +936,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
             amount1Min: amount1Min,
             recipient: address(this),
             deadline: block.timestamp + deadlineBuffer,
-            sqrtPriceX96: sqrtPriceX96
+            sqrtPriceX96: poolExists ? 0 : sqrtPriceX96
         });
 
         // Mint position - revert on failure instead of silent fail
@@ -1048,6 +1092,9 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @dev If Autopilot withdraw fails (e.g., during special window), NFT is marked unlocked
     ///      but stays in Autopilot. Use retryAutopilotWithdraw() later, then user calls claimUnlockedNFT()
     function emergencyWithdrawNFT(uint256 tokenId) external onlyOwner {
+        // L-08: Prevent emergency withdraw in Completed state to protect token distribution fairness
+        if (state == PoolState.Completed) revert PoolIsCompleted();
+        
         LockedNFT storage nft = lockedNFTs[tokenId];
 
         if (nft.owner == address(0)) revert NFTNotLocked();
@@ -1086,6 +1133,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Emergency withdraw NFTs in batches
     /// @param batchSize Number of NFTs to process
     function emergencyWithdrawBatch(uint256 batchSize) external onlyOwner {
+        // L-08: Prevent emergency withdraw in Completed state to protect token distribution fairness
+        if (state == PoolState.Completed) revert PoolIsCompleted();
         if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
         
         uint256 length = lockedTokenIds.length;

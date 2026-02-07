@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {KickoffVoteSalePool} from "./KickoffVoteSalePool.sol";
+import {VoteSalePoolDeployer} from "./VoteSalePoolDeployer.sol";
 import {LPLocker} from "./LPLocker.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IAutopilot, IAutopilotDepositValidator} from "./interfaces/IAutopilot.sol";
@@ -66,6 +66,12 @@ contract KickoffFactory {
     /// @notice WETH contract
     address public immutable weth;
 
+    /// @notice Shared price arbitrageur contract (fixes front-run pool prices)
+    address public immutable priceArbitrageur;
+
+    /// @notice Pool deployer contract (separated to avoid EIP-170 bytecode limit)
+    VoteSalePoolDeployer public immutable poolDeployer;
+
     /// @notice Array of all created pools
     address[] public allPools;
 
@@ -85,8 +91,10 @@ contract KickoffFactory {
     /// @param _voter Aerodrome Voter address
     /// @param _router Aerodrome Router address
     /// @param _weth WETH address
-    constructor(address _autopilot, address _votingEscrow, address _voter, address _router, address _weth) {
-        if (_autopilot == address(0) || _votingEscrow == address(0) || _voter == address(0) || _router == address(0) || _weth == address(0)) {
+    /// @param _priceArbitrageur Pre-deployed CLPriceArbitrageur contract address
+    /// @param _poolDeployer Pre-deployed VoteSalePoolDeployer contract address
+    constructor(address _autopilot, address _votingEscrow, address _voter, address _router, address _weth, address _priceArbitrageur, address _poolDeployer) {
+        if (_autopilot == address(0) || _votingEscrow == address(0) || _voter == address(0) || _router == address(0) || _weth == address(0) || _priceArbitrageur == address(0) || _poolDeployer == address(0)) {
             revert ZeroAddress();
         }
 
@@ -96,6 +104,8 @@ contract KickoffFactory {
         voter = _voter;
         router = _router;
         weth = _weth;
+        priceArbitrageur = _priceArbitrageur;
+        poolDeployer = VoteSalePoolDeployer(_poolDeployer);
 
         // Deploy LPLocker and link it to this factory
         lpLocker = new LPLocker();
@@ -144,20 +154,19 @@ contract KickoffFactory {
             revert PoolAlreadyExists();
         }
 
-        // Deploy new pool
-        pool = address(
-            new KickoffVoteSalePool(
-                projectToken,
-                poolAdmin, // admin (receives 30% of trading fees)
-                projectOwner,
-                totalAllocation,
-                minVotingPower,
-                address(lpLocker),
-                votingEscrow,
-                voter,
-                router,
-                weth
-            )
+        // Deploy new pool via deployer (separated to avoid EIP-170 bytecode limit)
+        pool = poolDeployer.deploy(
+            projectToken,
+            poolAdmin, // admin (receives 30% of trading fees)
+            projectOwner,
+            totalAllocation,
+            minVotingPower,
+            address(lpLocker),
+            votingEscrow,
+            voter,
+            router,
+            weth,
+            priceArbitrageur
         );
 
         // Transfer project tokens from pool admin to pool

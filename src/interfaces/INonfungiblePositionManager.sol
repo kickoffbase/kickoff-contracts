@@ -43,7 +43,7 @@ interface INonfungiblePositionManager {
     /// @param params The params necessary to collect fees
     /// @return amount0 The amount of fees collected in token0
     /// @return amount1 The amount of fees collected in token1
-    function collect(CollectParams calldata params) external returns (uint256 amount0, uint256 amount1);
+    function collect(CollectParams calldata params) external payable returns (uint256 amount0, uint256 amount1);
 
     /// @notice Returns the position information associated with a given token ID
     /// @param tokenId The ID of the token that represents the position
@@ -76,6 +76,29 @@ interface INonfungiblePositionManager {
             uint128 tokensOwed0,
             uint128 tokensOwed1
         );
+
+    /// @notice Parameters for decreasing liquidity
+    struct DecreaseLiquidityParams {
+        uint256 tokenId;
+        uint128 liquidity;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        uint256 deadline;
+    }
+
+    /// @notice Decreases the amount of liquidity in a position and accounts it to the position
+    /// @param params The params necessary to decrease liquidity
+    /// @return amount0 The amount of token0 accounted to the position's tokens owed
+    /// @return amount1 The amount of token1 accounted to the position's tokens owed
+    function decreaseLiquidity(DecreaseLiquidityParams calldata params)
+        external
+        payable
+        returns (uint256 amount0, uint256 amount1);
+
+    /// @notice Burns a token ID, which deletes it from the NFT contract
+    /// @dev The token must have 0 liquidity and all tokens must be collected first
+    /// @param tokenId The ID of the token that is being burned
+    function burn(uint256 tokenId) external payable;
 
     /// @notice Returns the owner of the NFT
     function ownerOf(uint256 tokenId) external view returns (address);

@@ -85,6 +85,27 @@ contract MockNonfungiblePositionManager {
         _positions[tokenId].tokensOwed1 = owed1;
     }
 
+    /// @notice Decrease liquidity in a position
+    function decreaseLiquidity(INonfungiblePositionManager.DecreaseLiquidityParams calldata params)
+        external
+        returns (uint256 amount0, uint256 amount1)
+    {
+        Position storage pos = _positions[params.tokenId];
+        if (params.liquidity <= pos.liquidity) {
+            pos.liquidity -= params.liquidity;
+        } else {
+            pos.liquidity = 0;
+        }
+        // Return 0 amounts (simplified mock)
+        return (0, 0);
+    }
+
+    /// @notice Burn a position NFT
+    function burn(uint256 tokenId) external {
+        require(_positions[tokenId].liquidity == 0, "Not empty");
+        delete _positions[tokenId];
+    }
+
     /// @notice Collect fees
     function collect(INonfungiblePositionManager.CollectParams calldata params)
         external

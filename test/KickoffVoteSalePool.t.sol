@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {KickoffFactory} from "../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../src/KickoffVoteSalePool.sol";
+import {CLPriceArbitrageur} from "../src/CLPriceArbitrageur.sol";
+import {VoteSalePoolDeployer} from "../src/VoteSalePoolDeployer.sol";
 import {KickoffPoolReader} from "../src/KickoffPoolReader.sol";
 import {LPLocker} from "../src/LPLocker.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -42,6 +44,7 @@ contract KickoffVoteSalePoolTest is Test {
     address constant USDC_ADDRESS = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant AERODROME_POOL_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
     address constant SLIPSTREAM_POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
+    address constant CL_FACTORY = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
 
     address constant AUTOPILOT_DEPOSIT_VALIDATOR = address(0x999);
     
@@ -96,6 +99,13 @@ contract KickoffVoteSalePoolTest is Test {
             abi.encode(true)
         );
         
+        // Mock CL Factory getPool to return address(0) (no existing pool)
+        vm.mockCall(
+            CL_FACTORY,
+            abi.encodeWithSignature("getPool(address,address,int24)"),
+            abi.encode(address(0))
+        );
+        
         // Deploy mock Slipstream position manager at hardcoded address
         MockNonfungiblePositionManager mockPositionManager = new MockNonfungiblePositionManager(address(0));
         vm.etch(SLIPSTREAM_POSITION_MANAGER, address(mockPositionManager).code);
@@ -109,14 +119,19 @@ contract KickoffVoteSalePoolTest is Test {
         voter.setGauge(mockPool, mockGauge);
         voter.setBribes(mockGauge, mockInternalBribe, mockExternalBribe);
 
-        // Deploy factory
+        // Deploy shared helper contracts and factory
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur();
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer();
         factory = new KickoffFactory(
             AUTOPILOT_ADDRESS,
             address(votingEscrow),
             address(voter),
             address(router),
-            address(weth)
+            address(weth),
+            address(arbitrageur),
+            address(poolDeployer)
         );
+        poolDeployer.setFactory(address(factory));
 
         lpLocker = factory.lpLocker();
         reader = new KickoffPoolReader();
@@ -172,6 +187,13 @@ contract KickoffVoteSalePoolTest is Test {
             AERODROME_POOL_FACTORY,
             abi.encodeWithSignature("isPool(address)"),
             abi.encode(true)
+        );
+        
+        // Re-mock CL Factory getPool to return address(0) (no existing pool)
+        vm.mockCall(
+            CL_FACTORY,
+            abi.encodeWithSignature("getPool(address,address,int24)"),
+            abi.encode(address(0))
         );
     }
 
@@ -556,6 +578,53 @@ contract KickoffVoteSalePoolTest is Test {
         vm.prank(user1);
         vm.expectRevert(KickoffVoteSalePool.NotOwner.selector);
         pool.emergencyWithdrawNFT(1);
+    }
+
+    /// @notice L-08: Emergency withdraw should revert in Completed state
+    function test_EmergencyWithdrawNFT_RevertWhenCompleted() public {
+        _setupAndFinalize();
+
+        // Pool is now Completed
+        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
+
+        // Emergency withdraw should revert to protect token distribution fairness
+        vm.prank(admin);
+        vm.expectRevert(KickoffVoteSalePool.PoolIsCompleted.selector);
+        pool.emergencyWithdrawNFT(1);
+    }
+
+    /// @notice L-08: Emergency withdraw batch should revert in Completed state
+    function test_EmergencyWithdrawBatch_RevertWhenCompleted() public {
+        _setupAndFinalize();
+
+        assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
+
+        vm.prank(admin);
+        vm.expectRevert(KickoffVoteSalePool.PoolIsCompleted.selector);
+        pool.emergencyWithdrawBatch(50);
+    }
+
+    /// @notice L-08: Verify fair token distribution is preserved (no totalVotingPower manipulation)
+    function test_FairDistribution_NotAffectedByEmergencyWithdraw() public {
+        _setupAndFinalize();
+
+        uint256 totalVP = pool.totalVotingPower();
+        assertEq(totalVP, USER1_VOTING_POWER + USER2_VOTING_POWER);
+
+        // Both users claim their fair share
+        uint256 expectedUser1 = (TOTAL_ALLOCATION / 2) * USER1_VOTING_POWER / totalVP;
+        uint256 expectedUser2 = (TOTAL_ALLOCATION / 2) * USER2_VOTING_POWER / totalVP;
+
+        vm.prank(user1);
+        pool.claimProjectTokens();
+        assertEq(projectToken.balanceOf(user1), expectedUser1);
+
+        vm.prank(user2);
+        pool.claimProjectTokens();
+        assertEq(projectToken.balanceOf(user2), expectedUser2);
+
+        // totalVotingPower should remain unchanged
+        assertEq(pool.totalVotingPower(), totalVP, "totalVotingPower should not change in Completed state");
     }
 
     /*//////////////////////////////////////////////////////////////

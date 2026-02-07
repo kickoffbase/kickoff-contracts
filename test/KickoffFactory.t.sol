@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {KickoffFactory} from "../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../src/KickoffVoteSalePool.sol";
+import {CLPriceArbitrageur} from "../src/CLPriceArbitrageur.sol";
+import {VoteSalePoolDeployer} from "../src/VoteSalePoolDeployer.sol";
 import {LPLocker} from "../src/LPLocker.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
@@ -34,8 +36,11 @@ contract KickoffFactoryTest is Test {
         vm.mockCall(autopilot, abi.encodeWithSignature("deposit_validator()"), abi.encode(depositValidator));
         vm.mockCall(depositValidator, abi.encodeWithSignature("minimum_lock_amount()"), abi.encode(1000 ether));
 
-        // Deploy factory (owner = address(this))
-        factory = new KickoffFactory(autopilot, votingEscrow, voter, router, weth);
+        // Deploy shared helper contracts and factory (owner = address(this))
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur();
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer();
+        factory = new KickoffFactory(autopilot, votingEscrow, voter, router, weth, address(arbitrageur), address(poolDeployer));
+        poolDeployer.setFactory(address(factory));
 
         // Mint tokens to admin (pool admin)
         projectToken.mint(admin, TOTAL_ALLOCATION);

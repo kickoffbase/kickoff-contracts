@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {KickoffFactory} from "../../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../../src/KickoffVoteSalePool.sol";
+import {CLPriceArbitrageur} from "../../src/CLPriceArbitrageur.sol";
+import {VoteSalePoolDeployer} from "../../src/VoteSalePoolDeployer.sol";
 import {KickoffPoolReader} from "../../src/KickoffPoolReader.sol";
 import {LPLocker} from "../../src/LPLocker.sol";
 import {IVotingEscrow} from "../../src/interfaces/IVotingEscrow.sol";
@@ -58,8 +60,11 @@ contract RealVeAEROTest is Test {
         projectToken = new MockToken("KICK", "KICK");
         projectToken.mint(admin, 10_000_000 ether);
 
-        // Deploy factory (this contract becomes owner)
-        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH);
+        // Deploy shared helper contracts and factory (this contract becomes owner)
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur();
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer();
+        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH, address(arbitrageur), address(poolDeployer));
+        poolDeployer.setFactory(address(factory));
         lpLocker = factory.lpLocker();
         reader = new KickoffPoolReader();
 

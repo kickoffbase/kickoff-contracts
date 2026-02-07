@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {KickoffFactory} from "../../src/KickoffFactory.sol";
 import {KickoffVoteSalePool} from "../../src/KickoffVoteSalePool.sol";
+import {CLPriceArbitrageur} from "../../src/CLPriceArbitrageur.sol";
+import {VoteSalePoolDeployer} from "../../src/VoteSalePoolDeployer.sol";
 import {LPLocker} from "../../src/LPLocker.sol";
 import {IVotingEscrow} from "../../src/interfaces/IVotingEscrow.sol";
 import {IVoter} from "../../src/interfaces/IVoter.sol";
@@ -66,8 +68,11 @@ contract AutopilotIntegrationTest is Test {
         projectToken = new MockToken("KICKOFF", "KICK");
         projectToken.mint(admin, 10_000_000 ether);
 
-        // Deploy factory
-        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH);
+        // Deploy shared helper contracts and factory
+        CLPriceArbitrageur arbitrageur = new CLPriceArbitrageur();
+        VoteSalePoolDeployer poolDeployer = new VoteSalePoolDeployer();
+        factory = new KickoffFactory(AUTOPILOT, VOTING_ESCROW, VOTER, ROUTER, WETH, address(arbitrageur), address(poolDeployer));
+        poolDeployer.setFactory(address(factory));
         lpLocker = factory.lpLocker();
 
         // Admin approves tokens

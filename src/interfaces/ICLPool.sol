@@ -38,6 +38,22 @@ interface ICLPool {
     /// @notice The currently in range liquidity available to the pool
     function liquidity() external view returns (uint128);
 
+    /// @notice Swap token0 for token1, or token1 for token0
+    /// @param recipient The address to receive the output of the swap
+    /// @param zeroForOne The direction of the swap (true = token0 -> token1)
+    /// @param amountSpecified The amount of the swap (positive = exact input, negative = exact output)
+    /// @param sqrtPriceLimitX96 The price limit the swap cannot exceed
+    /// @param data Any data to be passed through to the callback
+    /// @return amount0 The delta of the balance of token0 of the pool
+    /// @return amount1 The delta of the balance of token1 of the pool
+    function swap(
+        address recipient,
+        bool zeroForOne,
+        int256 amountSpecified,
+        uint160 sqrtPriceLimitX96,
+        bytes calldata data
+    ) external returns (int256 amount0, int256 amount1);
+
     /// @notice Look up information about a specific tick
     function ticks(int24 tick)
         external
