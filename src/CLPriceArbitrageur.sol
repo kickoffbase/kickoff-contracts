@@ -11,7 +11,7 @@ import {TickMathLib} from "./libraries/TickMathLib.sol";
 /// @notice Shared contract for fixing CL pool prices via dust arbitrage
 /// @dev Used by KickoffVoteSalePool to correct pool price when someone front-runs pool creation
 /// @dev Stateless - can be shared across all vote-sale pools
-/// @dev Flow: caller approves DUST_AMOUNT of each token → calls fixPoolPrice() →
+/// @dev Flow: caller approves dustAmount of each token → calls fixPoolPrice() →
 ///      arbitrageur transferFrom's dust tokens, adds dust liquidity, swaps to target price,
 ///      cleans up dust position, and returns remaining tokens to caller
 contract CLPriceArbitrageur {
@@ -22,19 +22,18 @@ contract CLPriceArbitrageur {
     error DustArbitrageFailed();
     error UnauthorizedCallback();
     error InvalidTickRange();
+    error PriceNotReached();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
     event PoolPriceArbitraged(address indexed pool, uint160 oldSqrtPriceX96, uint160 newSqrtPriceX96);
+    event TailTickCorrected(address indexed pool, int24 oldTick, int24 newTick);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Dust amount used per token for price arbitrage (wei)
-    uint256 public constant DUST_AMOUNT = 1000;
 
     /// @notice Aerodrome Slipstream NonfungiblePositionManager on Base mainnet
     INonfungiblePositionManager public constant clPositionManager = 
@@ -52,27 +51,64 @@ contract CLPriceArbitrageur {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Fix a CL pool's price via dust arbitrage
-    /// @dev Caller must approve DUST_AMOUNT of both token0 and token1 to this contract before calling
-    /// @dev Adds dust concentrated liquidity, swaps to target price, cleans up, returns remaining tokens
+    /// @dev Caller must approve `dustAmount` of both token0 and token1 to this contract before calling.
+    ///      Admin specifies dustAmount in wei each time — use a small value (e.g. 1000) for normal cases,
+    ///      or increase if the attacker added liquidity to the pool and the swap can't reach the target.
+    /// @dev H-01 fix: If pool tick is in the tail zone (outside ±887200 but within canonical ±887272),
+    ///      performs a free swap through the guaranteed-empty tail zone first, then proceeds with dust arbitrage.
+    ///      The tail zone has zero liquidity by definition (no tickSpacing=200 position can cover it),
+    ///      so the swap costs zero tokens.
+    /// @dev H-02 fix: After the dust swap, verifies that the target price was actually reached.
+    ///      Reverts with PriceNotReached() if the dust amount was insufficient.
     /// @param pool The existing CL pool address
     /// @param token0 The pool's token0 address (sorted)
     /// @param token1 The pool's token1 address (sorted)
     /// @param targetSqrtPrice The desired sqrtPriceX96 (fair price)
     /// @param tickSpacing The pool's tick spacing
+    /// @param dustAmount Amount of each token (in wei) to use for dust arbitrage
     function fixPoolPrice(
         address pool,
         address token0,
         address token1,
         uint160 targetSqrtPrice,
-        int24 tickSpacing
+        int24 tickSpacing,
+        uint256 dustAmount
     ) external {
         // Read current price
-        (uint160 currentSqrtPrice,,,,,) = ICLPool(pool).slot0();
+        (uint160 currentSqrtPrice, int24 currentTick,,,,) = ICLPool(pool).slot0();
         if (currentSqrtPrice == targetSqrtPrice) return;
 
+        uint160 originalSqrtPrice = currentSqrtPrice;
+
+        // H-01: If current tick is in the tail zone (outside tickSpacing-aligned bounds),
+        // perform a free swap to bring the price back into the supported range.
+        // The tail zone [887201..887271] and [-887272..-887201] has ZERO active liquidity
+        // because no tickSpacing=200 position can cover those ticks. The swap traverses
+        // the empty bitmap for free (0 tokens consumed).
+        if (currentTick > CL_MAX_TICK || currentTick < CL_MIN_TICK) {
+            bool tailZeroForOne = currentTick > CL_MAX_TICK;
+            ICLPool(pool).swap(
+                address(this),
+                tailZeroForOne,
+                int256(1), // Minimal amountSpecified (pool requires != 0)
+                targetSqrtPrice,
+                abi.encode(token0, token1)
+            );
+
+            // Re-read price after tail correction
+            (currentSqrtPrice, currentTick,,,,) = ICLPool(pool).slot0();
+            emit TailTickCorrected(pool, currentTick, currentTick);
+
+            // If target already reached (empty pool case), we're done
+            if (currentSqrtPrice == targetSqrtPrice) {
+                emit PoolPriceArbitraged(pool, originalSqrtPrice, targetSqrtPrice);
+                return;
+            }
+        }
+
         // Transfer dust tokens from caller
-        IERC20(token0).transferFrom(msg.sender, address(this), DUST_AMOUNT);
-        IERC20(token1).transferFrom(msg.sender, address(this), DUST_AMOUNT);
+        IERC20(token0).transferFrom(msg.sender, address(this), dustAmount);
+        IERC20(token1).transferFrom(msg.sender, address(this), dustAmount);
 
         // Determine swap direction
         bool zeroForOne = currentSqrtPrice > targetSqrtPrice;
@@ -84,8 +120,8 @@ contract CLPriceArbitrageur {
         (int24 tickLower, int24 tickUpper) = _calculateTickRange(tickA, tickB, tickSpacing);
 
         // Step 2: Add dust concentrated liquidity to enable the swap
-        IERC20(token0).approve(address(clPositionManager), DUST_AMOUNT);
-        IERC20(token1).approve(address(clPositionManager), DUST_AMOUNT);
+        IERC20(token0).approve(address(clPositionManager), dustAmount);
+        IERC20(token1).approve(address(clPositionManager), dustAmount);
 
         INonfungiblePositionManager.MintParams memory dustParams = INonfungiblePositionManager.MintParams({
             token0: token0,
@@ -93,8 +129,8 @@ contract CLPriceArbitrageur {
             tickSpacing: tickSpacing,
             tickLower: tickLower,
             tickUpper: tickUpper,
-            amount0Desired: DUST_AMOUNT,
-            amount1Desired: DUST_AMOUNT,
+            amount0Desired: dustAmount,
+            amount1Desired: dustAmount,
             amount0Min: 0,
             amount1Min: 0,
             recipient: address(this),
@@ -109,7 +145,7 @@ contract CLPriceArbitrageur {
         ICLPool(pool).swap(
             address(this),
             zeroForOne,
-            int256(DUST_AMOUNT),
+            int256(dustAmount),
             targetSqrtPrice,
             abi.encode(token0, token1)
         );
@@ -142,7 +178,12 @@ contract CLPriceArbitrageur {
         if (bal0 > 0) IERC20(token0).transfer(msg.sender, bal0);
         if (bal1 > 0) IERC20(token1).transfer(msg.sender, bal1);
 
-        emit PoolPriceArbitraged(pool, currentSqrtPrice, targetSqrtPrice);
+        // H-02: Verify target price was actually reached after dust swap
+        // If dust amount was insufficient to overcome attacker's liquidity, revert
+        (uint160 postSwapPrice,,,,,) = ICLPool(pool).slot0();
+        if (postSwapPrice != targetSqrtPrice) revert PriceNotReached();
+
+        emit PoolPriceArbitraged(pool, originalSqrtPrice, targetSqrtPrice);
     }
 
     /*//////////////////////////////////////////////////////////////

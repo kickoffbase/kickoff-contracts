@@ -261,7 +261,7 @@ contract CLPriceArbitrageurTest is Test {
         uint256 bal1Before = IERC20(token1).balanceOf(address(this));
 
         // Should return early without consuming any tokens
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, targetPrice, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, targetPrice, 200, 1000);
 
         uint256 bal0After = IERC20(token0).balanceOf(address(this));
         uint256 bal1After = IERC20(token1).balanceOf(address(this));
@@ -304,7 +304,7 @@ contract CLPriceArbitrageurTest is Test {
         vm.expectEmit(true, false, false, true);
         emit CLPriceArbitrageur.PoolPriceArbitraged(address(pool), PRICE_4_TO_1, PRICE_1_TO_1);
 
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
 
         // Pool price should now be at target
         (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
@@ -340,7 +340,7 @@ contract CLPriceArbitrageurTest is Test {
         vm.expectEmit(true, false, false, true);
         emit CLPriceArbitrageur.PoolPriceArbitraged(address(pool), PRICE_025_TO_1, PRICE_1_TO_1);
 
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
 
         (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
         assertEq(newPrice, PRICE_1_TO_1, "Pool price should be corrected to target");
@@ -371,7 +371,7 @@ contract CLPriceArbitrageurTest is Test {
             INonfungiblePositionManager.burn.selector
         ), abi.encode());
 
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
 
         (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
         assertEq(newPrice, PRICE_1_TO_1, "Pool price should be corrected from 100x deviation");
@@ -402,18 +402,10 @@ contract CLPriceArbitrageurTest is Test {
             INonfungiblePositionManager.burn.selector
         ), abi.encode());
 
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
 
         (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
         assertEq(newPrice, PRICE_1_TO_1, "Pool price should be corrected from 0.01x deviation");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-              TEST: DUST_AMOUNT CONSTANT
-    //////////////////////////////////////////////////////////////*/
-
-    function test_dustAmount() public view {
-        assertEq(arbitrageur.DUST_AMOUNT(), 1000, "DUST_AMOUNT should be 1000");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -441,7 +433,7 @@ contract CLPriceArbitrageurTest is Test {
             INonfungiblePositionManager.burn.selector
         ), abi.encode());
 
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
 
         // Arbitrageur should have 0 balance after returning tokens
         assertEq(IERC20(token0).balanceOf(address(arbitrageur)), 0, "Arbitrageur should return all token0");
@@ -465,7 +457,7 @@ contract CLPriceArbitrageurTest is Test {
         ), abi.encode(uint256(1), uint128(0), uint256(0), uint256(0)));
 
         vm.expectRevert(CLPriceArbitrageur.DustArbitrageFailed.selector);
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -485,7 +477,7 @@ contract CLPriceArbitrageurTest is Test {
         ), abi.encode(uint256(0), uint128(1), uint256(1), uint256(1)));
 
         vm.expectRevert(CLPriceArbitrageur.DustArbitrageFailed.selector);
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -599,7 +591,7 @@ contract CLPriceArbitrageurTest is Test {
         ), abi.encode());
 
         // Should not revert - tick range calculation succeeds
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -629,7 +621,7 @@ contract CLPriceArbitrageurTest is Test {
         ), abi.encode());
 
         // Should not revert with negative ticks
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_025_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_025_TO_1, 200, 1000);
 
         (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
         assertEq(newPrice, PRICE_025_TO_1, "Price should be corrected to 0.25");
@@ -660,7 +652,7 @@ contract CLPriceArbitrageurTest is Test {
             INonfungiblePositionManager.burn.selector
         ), abi.encode());
 
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_4_TO_1, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_4_TO_1, 200, 1000);
 
         (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
         assertEq(newPrice, PRICE_4_TO_1, "Price should cross zero tick boundary");
@@ -695,7 +687,7 @@ contract CLPriceArbitrageurTest is Test {
         ), abi.encode());
 
         // Should handle minimal price difference without reverting
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, priceB, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, priceB, 200, 1000);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -722,7 +714,7 @@ contract CLPriceArbitrageurTest is Test {
 
         uint256 bal0Before = IERC20(token0).balanceOf(address(this));
 
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, exactPrice, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, exactPrice, 200, 1000);
 
         // Should be a no-op - no tokens consumed
         assertEq(IERC20(token0).balanceOf(address(this)), bal0Before, "No tokens should be consumed for same price");
@@ -756,7 +748,7 @@ contract CLPriceArbitrageurTest is Test {
         ), abi.encode());
 
         // Even 1 wei difference should trigger arbitrage
-        arbitrageur.fixPoolPrice(address(pool), token0, token1, targetPrice, 200);
+        arbitrageur.fixPoolPrice(address(pool), token0, token1, targetPrice, 200, 1000);
 
         (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
         assertEq(newPrice, targetPrice, "Should handle 1 wei price difference");

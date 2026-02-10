@@ -420,7 +420,7 @@ contract AutopilotIntegrationTest is Test {
         
         // Phase 6: Complete finalization
         vm.prank(admin);
-        try pool.completeAutopilotFinalization() {
+        try pool.completeAutopilotFinalization(1000) {
             console.log("Phase 6: Completed finalization");
         } catch Error(string memory reason) {
             console.log("Finalization failed:", reason);

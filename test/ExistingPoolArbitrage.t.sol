@@ -292,7 +292,7 @@ contract ExistingPoolArbitrageTest is Test {
         _mockNoExistingPool();
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // Pool should be completed
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
@@ -334,7 +334,7 @@ contract ExistingPoolArbitrageTest is Test {
         uint256 token1BalBefore = IERC20(token1).balanceOf(address(pool));
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
         assertTrue(pool.lpPositionId() > 0, "LP position should be created");
@@ -359,7 +359,7 @@ contract ExistingPoolArbitrageTest is Test {
         MockCLPoolForArbitrage mockPool = _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
         assertTrue(pool.lpPositionId() > 0, "LP position should be created");
@@ -384,7 +384,7 @@ contract ExistingPoolArbitrageTest is Test {
         MockCLPoolForArbitrage mockPool = _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
         assertTrue(pool.lpPositionId() > 0, "LP position should be created");
@@ -407,7 +407,7 @@ contract ExistingPoolArbitrageTest is Test {
         MockCLPoolForArbitrage mockPool = _deployMockPool(extremePrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
         assertTrue(pool.lpPositionId() > 0, "LP position should be created even after extreme arbitrage");
@@ -427,7 +427,7 @@ contract ExistingPoolArbitrageTest is Test {
         MockCLPoolForArbitrage mockPool = _deployMockPool(extremePrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
         assertTrue(pool.lpPositionId() > 0);
@@ -454,7 +454,7 @@ contract ExistingPoolArbitrageTest is Test {
         assertTrue(poolBal1Before > DUST_AMOUNT, "Pool should have enough token1");
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
     }
@@ -471,7 +471,7 @@ contract ExistingPoolArbitrageTest is Test {
         _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         uint256 positionId = pool.lpPositionId();
         assertTrue(positionId > 0, "LP position should exist");
@@ -513,7 +513,7 @@ contract ExistingPoolArbitrageTest is Test {
         ), abi.encode(address(0)));
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
     }
@@ -541,7 +541,7 @@ contract ExistingPoolArbitrageTest is Test {
         vm.recordLogs();
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // If we got here without reverting, the mint was called with sqrtPriceX96=0
         // (since the mock position manager doesn't revert on pool creation attempts)
@@ -572,7 +572,7 @@ contract ExistingPoolArbitrageTest is Test {
         emit CLPriceArbitrageur.PoolPriceArbitraged(address(mockPool), manipulatedPrice, targetPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -589,7 +589,7 @@ contract ExistingPoolArbitrageTest is Test {
         (address token0, address token1) = _getSortedTokens();
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // Arbitrageur should have returned all tokens
         assertEq(IERC20(token0).balanceOf(address(arbitrageur)), 0, "Arbitrageur should hold 0 token0");
@@ -610,7 +610,7 @@ contract ExistingPoolArbitrageTest is Test {
         (address token0, address token1) = _getSortedTokens();
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // Check that approvals to arbitrageur are reset to 0
         assertEq(IERC20(token0).allowance(address(pool), address(arbitrageur)), 0, "token0 approval should be reset");
@@ -629,7 +629,7 @@ contract ExistingPoolArbitrageTest is Test {
         _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // User should be able to claim tokens
         uint256 expectedAmount = (TOTAL_ALLOCATION / 2) * USER1_VOTING_POWER / USER1_VOTING_POWER;
@@ -651,7 +651,7 @@ contract ExistingPoolArbitrageTest is Test {
         _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // User should be able to unlock their veAERO
         vm.prank(user1);
@@ -726,7 +726,7 @@ contract ExistingPoolArbitrageTest is Test {
         ), abi.encode(address(0)));
 
         vm.prank(admin);
-        smallPool.completeAutopilotFinalization();
+        smallPool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(smallPool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
     }
@@ -750,7 +750,7 @@ contract ExistingPoolArbitrageTest is Test {
         _deployMockPool(correctPrice + 1);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
     }
@@ -780,7 +780,7 @@ contract ExistingPoolArbitrageTest is Test {
         _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
     }
@@ -800,7 +800,7 @@ contract ExistingPoolArbitrageTest is Test {
         _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // Should be Completed, not stuck in Finalizing
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
@@ -821,12 +821,12 @@ contract ExistingPoolArbitrageTest is Test {
         _deployMockPool(manipulatedPrice);
 
         vm.prank(admin);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
 
         // Try to finalize again - should revert
         vm.prank(admin);
         vm.expectRevert(KickoffVoteSalePool.InvalidState.selector);
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -373,7 +373,7 @@ contract FullFlowForkTest is Test {
         
         // Step 3: Complete finalization (add liquidity & lock LP)
         console.log("Step 3: Completing finalization...");
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
         
         vm.stopPrank();
         

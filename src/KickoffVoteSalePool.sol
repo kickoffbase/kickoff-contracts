@@ -799,12 +799,17 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Complete the Autopilot finalization by adding liquidity
     /// @dev Call after convertUSDCtoWETH
-    function completeAutopilotFinalization() external nonReentrant onlyAdmin inState(PoolState.Finalizing) {
+    /// @dev Admin specifies dustAmount in wei for price arbitrage (e.g. 1000 for normal cases).
+    ///      If the pool was front-run and the attacker added liquidity, increase dustAmount
+    ///      to overcome it. Simulate the tx first — if it reverts with PriceNotReached,
+    ///      retry with a larger value.
+    /// @param dustAmount Amount of each token (in wei) to use for dust price arbitrage
+    function completeAutopilotFinalization(uint256 dustAmount) external nonReentrant onlyAdmin inState(PoolState.Finalizing) {
         if (batchInProgress) revert BatchInProgress();
         if (finalizeStep != FinalizeStep.AddingLiquidity) revert InvalidState();
 
         // Add liquidity
-        _addLiquidity();
+        _addLiquidity(dustAmount);
 
         // Lock LP
         _lockLP();
@@ -868,7 +873,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @dev Creates or adds to a CL pool with full-range position for max coverage
     /// @dev If pool was front-run by attacker, performs dust arbitrage to correct price
     /// @dev #8: Only uses tracked claimed rewards, not external WETH donations
-    function _addLiquidity() internal {
+    /// @param dustAmount Amount of each token (in wei) to use for dust price arbitrage
+    function _addLiquidity(uint256 dustAmount) internal {
         // #8: Use tracked claimed rewards, not balanceOf (prevents external WETH griefing)
         if (totalClaimedRewards == 0) return;
         
@@ -892,22 +898,22 @@ contract KickoffVoteSalePool is IERC721Receiver {
         address existingPool = clFactory.getPool(token0, token1, CL_TICK_SPACING);
         if (existingPool != address(0)) {
             poolExists = true;
-            uint256 dustAmount = priceArbitrageur.DUST_AMOUNT();
             (uint160 currentSqrtPrice,,,,,) = ICLPool(existingPool).slot0();
             if (currentSqrtPrice != sqrtPriceX96) {
                 // Approve dust tokens to arbitrageur, which will transferFrom them
                 IERC20(token0).approve(address(priceArbitrageur), dustAmount);
                 IERC20(token1).approve(address(priceArbitrageur), dustAmount);
-                priceArbitrageur.fixPoolPrice(existingPool, token0, token1, sqrtPriceX96, CL_TICK_SPACING);
+                priceArbitrageur.fixPoolPrice(existingPool, token0, token1, sqrtPriceX96, CL_TICK_SPACING, dustAmount);
                 // Reset approvals
                 IERC20(token0).approve(address(priceArbitrageur), 0);
                 IERC20(token1).approve(address(priceArbitrageur), 0);
+
+                // M-01 fix: Only subtract dust reserve when arbitrage actually occurred.
+                // fixPoolPrice uses at most dustAmount of each token for the concentrated
+                // position + swap. Subtracting ensures mint() won't fail due to insufficient balance.
+                if (amount0 > dustAmount) amount0 -= dustAmount;
+                if (amount1 > dustAmount) amount1 -= dustAmount;
             }
-            // Subtract dust reserve from amounts to account for tokens spent on arbitrage
-            // fixPoolPrice uses at most DUST_AMOUNT of each token for the concentrated
-            // position + swap. Subtracting ensures mint() won't fail due to insufficient balance.
-            if (amount0 > dustAmount) amount0 -= dustAmount;
-            if (amount1 > dustAmount) amount1 -= dustAmount;
         }
 
         // Approve position manager (reset to 0 first for tokens like USDT that require it)
@@ -1132,9 +1138,14 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
     /// @notice Emergency withdraw NFTs in batches
     /// @param batchSize Number of NFTs to process
+    /// @dev M-02 fix: Reverts in Finalizing state to prevent batchIndex desynchronization
+    ///      with the reward-claiming batch flow. Use emergencyWithdrawNFT() for single NFTs instead.
     function emergencyWithdrawBatch(uint256 batchSize) external onlyOwner {
         // L-08: Prevent emergency withdraw in Completed state to protect token distribution fairness
         if (state == PoolState.Completed) revert PoolIsCompleted();
+        // M-02: Prevent batch emergency withdraw during Finalizing to avoid batchIndex desync
+        // with startClaimRewardsFromAutopilot/continueClaimRewardsFromAutopilot
+        if (state == PoolState.Finalizing) revert InvalidState();
         if (batchSize > MAX_BATCH_SIZE) revert BatchSizeTooLarge();
         
         uint256 length = lockedTokenIds.length;

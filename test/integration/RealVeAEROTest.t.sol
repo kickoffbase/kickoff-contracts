@@ -206,7 +206,7 @@ contract RealVeAEROTest is Test {
         vm.startPrank(admin);
         pool.startClaimRewardsFromAutopilot(50);
         pool.convertUSDCtoWETH();
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
         vm.stopPrank();
 
         console.log("WETH Collected:", pool.wethCollected() / 1e18, "WETH");

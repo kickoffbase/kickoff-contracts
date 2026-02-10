@@ -473,7 +473,7 @@ contract KickoffVoteSalePoolTest is Test {
         weth.mint(address(pool), 10 ether);
         
         pool.convertUSDCtoWETH();
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
         vm.stopPrank();
 
         assertEq(uint256(pool.state()), uint256(KickoffVoteSalePool.PoolState.Completed));
@@ -701,8 +701,8 @@ contract KickoffVoteSalePoolTest is Test {
         weth.mint(address(pool), 10 ether);
         
         pool.convertUSDCtoWETH();
-        pool.completeAutopilotFinalization();
+        pool.completeAutopilotFinalization(1000);
         vm.stopPrank();
-    }
+}
 }
 
