@@ -32,6 +32,15 @@ contract CLPriceArbitrageur {
     event TailTickCorrected(address indexed pool, int24 oldTick, int24 newTick);
 
     /*//////////////////////////////////////////////////////////////
+                               STATE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice The pool address expected for the current swap callback
+    /// @dev Set before each swap() call and checked in uniswapV3SwapCallback()
+    ///      to ensure only the exact pool being arbitraged can trigger the callback
+    address private _expectedPool;
+
+    /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
@@ -66,6 +75,8 @@ contract CLPriceArbitrageur {
     /// @param targetSqrtPrice The desired sqrtPriceX96 (fair price)
     /// @param tickSpacing The pool's tick spacing
     /// @param dustAmount Amount of each token (in wei) to use for dust arbitrage
+    /// @return spent0 Actual amount of token0 spent (dustAmount minus returned remainder)
+    /// @return spent1 Actual amount of token1 spent (dustAmount minus returned remainder)
     function fixPoolPrice(
         address pool,
         address token0,
@@ -73,10 +84,10 @@ contract CLPriceArbitrageur {
         uint160 targetSqrtPrice,
         int24 tickSpacing,
         uint256 dustAmount
-    ) external {
+    ) external returns (uint256 spent0, uint256 spent1) {
         // Read current price
         (uint160 currentSqrtPrice, int24 currentTick,,,,) = ICLPool(pool).slot0();
-        if (currentSqrtPrice == targetSqrtPrice) return;
+        if (currentSqrtPrice == targetSqrtPrice) return (0, 0);
 
         uint160 originalSqrtPrice = currentSqrtPrice;
 
@@ -86,7 +97,10 @@ contract CLPriceArbitrageur {
         // because no tickSpacing=200 position can cover those ticks. The swap traverses
         // the empty bitmap for free (0 tokens consumed).
         if (currentTick > CL_MAX_TICK || currentTick < CL_MIN_TICK) {
+            int24 oldTick = currentTick;
             bool tailZeroForOne = currentTick > CL_MAX_TICK;
+
+            _expectedPool = pool;
             ICLPool(pool).swap(
                 address(this),
                 tailZeroForOne,
@@ -94,17 +108,22 @@ contract CLPriceArbitrageur {
                 targetSqrtPrice,
                 abi.encode(token0, token1)
             );
+            _expectedPool = address(0);
 
             // Re-read price after tail correction
             (currentSqrtPrice, currentTick,,,,) = ICLPool(pool).slot0();
-            emit TailTickCorrected(pool, currentTick, currentTick);
+            emit TailTickCorrected(pool, oldTick, currentTick);
 
             // If target already reached (empty pool case), we're done
             if (currentSqrtPrice == targetSqrtPrice) {
                 emit PoolPriceArbitraged(pool, originalSqrtPrice, targetSqrtPrice);
-                return;
+                return (0, 0);
             }
         }
+
+        // Record caller balances before transferFrom to compute precise spend
+        uint256 callerBal0Before = IERC20(token0).balanceOf(msg.sender);
+        uint256 callerBal1Before = IERC20(token1).balanceOf(msg.sender);
 
         // Transfer dust tokens from caller
         IERC20(token0).transferFrom(msg.sender, address(this), dustAmount);
@@ -142,6 +161,7 @@ contract CLPriceArbitrageur {
         if (dustTokenId == 0 || dustLiquidity == 0) revert DustArbitrageFailed();
 
         // Step 3: Swap to move price to target
+        _expectedPool = pool;
         ICLPool(pool).swap(
             address(this),
             zeroForOne,
@@ -149,6 +169,7 @@ contract CLPriceArbitrageur {
             targetSqrtPrice,
             abi.encode(token0, token1)
         );
+        _expectedPool = address(0);
 
         // Step 4: Remove dust position
         clPositionManager.decreaseLiquidity(
@@ -183,6 +204,13 @@ contract CLPriceArbitrageur {
         (uint160 postSwapPrice,,,,,) = ICLPool(pool).slot0();
         if (postSwapPrice != targetSqrtPrice) revert PriceNotReached();
 
+        // Compute actual tokens spent by comparing caller balances
+        // If caller ended up with more tokens (net gain from swap output), spent is 0
+        uint256 callerBal0After = IERC20(token0).balanceOf(msg.sender);
+        uint256 callerBal1After = IERC20(token1).balanceOf(msg.sender);
+        spent0 = callerBal0After < callerBal0Before ? callerBal0Before - callerBal0After : 0;
+        spent1 = callerBal1After < callerBal1Before ? callerBal1Before - callerBal1After : 0;
+
         emit PoolPriceArbitraged(pool, originalSqrtPrice, targetSqrtPrice);
     }
 
@@ -192,25 +220,16 @@ contract CLPriceArbitrageur {
 
     /// @notice Callback for CL pool swaps (Uniswap V3 compatible)
     /// @dev Called by the CL pool during swap() to collect input tokens
-    /// @dev Security: validates caller is a legitimate Aerodrome CL pool via factory
+    /// @dev Security: validates msg.sender is the exact pool set by fixPoolPrice() before swap()
     function uniswapV3SwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
         bytes calldata data
     ) external {
-        (address token0, address token1) = abi.decode(data, (address, address));
+        // Security: only the exact pool being arbitraged can trigger the callback
+        if (msg.sender != _expectedPool) revert UnauthorizedCallback();
 
-        // Security: verify caller is a legitimate CL pool
-        // Check all possible tick spacings that could match this pool
-        bool isLegitimate;
-        int24[4] memory spacings = [int24(1), int24(50), int24(100), int24(200)];
-        for (uint256 i = 0; i < spacings.length; i++) {
-            if (clFactory.getPool(token0, token1, spacings[i]) == msg.sender) {
-                isLegitimate = true;
-                break;
-            }
-        }
-        if (!isLegitimate) revert UnauthorizedCallback();
+        (address token0, address token1) = abi.decode(data, (address, address));
 
         if (amount0Delta > 0) {
             IERC20(token0).transfer(msg.sender, uint256(amount0Delta));

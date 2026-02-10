@@ -99,6 +99,7 @@ contract KickoffVoteSalePool is IERC721Receiver {
     event AutopilotRewardsClaimed(uint256 indexed tokenId, uint256 amount);
     event VeAERODeposited(address indexed user, uint256 indexed tokenId, uint256 votingPower);
     event DepositConfirmed(address indexed user, uint256 indexed tokenId);
+    event PriceArbitrageurUpdated(address indexed oldArbitrageur, address indexed newArbitrageur);
 
     /*//////////////////////////////////////////////////////////////
                                  ENUMS
@@ -180,7 +181,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
     IWETH public immutable weth;
 
     /// @notice Price arbitrageur contract (shared, for fixing front-run pool prices)
-    CLPriceArbitrageur public immutable priceArbitrageur;
+    /// @dev Configurable (non-immutable) to allow upgrades if arbitrage logic needs changes
+    CLPriceArbitrageur public priceArbitrageur;
 
     /// @notice Protocol owner (for emergency functions)
     address public owner;
@@ -903,16 +905,17 @@ contract KickoffVoteSalePool is IERC721Receiver {
                 // Approve dust tokens to arbitrageur, which will transferFrom them
                 IERC20(token0).approve(address(priceArbitrageur), dustAmount);
                 IERC20(token1).approve(address(priceArbitrageur), dustAmount);
-                priceArbitrageur.fixPoolPrice(existingPool, token0, token1, sqrtPriceX96, CL_TICK_SPACING, dustAmount);
+                (uint256 spent0, uint256 spent1) = priceArbitrageur.fixPoolPrice(
+                    existingPool, token0, token1, sqrtPriceX96, CL_TICK_SPACING, dustAmount
+                );
                 // Reset approvals
                 IERC20(token0).approve(address(priceArbitrageur), 0);
                 IERC20(token1).approve(address(priceArbitrageur), 0);
 
-                // M-01 fix: Only subtract dust reserve when arbitrage actually occurred.
-                // fixPoolPrice uses at most dustAmount of each token for the concentrated
-                // position + swap. Subtracting ensures mint() won't fail due to insufficient balance.
-                if (amount0 > dustAmount) amount0 -= dustAmount;
-                if (amount1 > dustAmount) amount1 -= dustAmount;
+                // M-01 fix: Subtract only the actual tokens spent on arbitrage (not the full dustAmount).
+                // fixPoolPrice returns precise spend after returning unused tokens to caller.
+                if (amount0 > spent0) amount0 -= spent0;
+                if (amount1 > spent1) amount1 -= spent1;
             }
         }
 
@@ -1391,6 +1394,16 @@ contract KickoffVoteSalePool is IERC721Receiver {
     function setDeadlineBuffer(uint256 _buffer) external onlyAdmin {
         if (_buffer > 1 hours) revert InvalidDeadline();
         deadlineBuffer = _buffer;
+    }
+
+    /// @notice Update the price arbitrageur contract
+    /// @dev Allows upgrading arbitrage logic without redeploying the pool
+    /// @param _newArbitrageur Address of the new CLPriceArbitrageur contract
+    function setPriceArbitrageur(address _newArbitrageur) external onlyOwner {
+        if (_newArbitrageur == address(0)) revert ZeroAddress();
+        address oldArbitrageur = address(priceArbitrageur);
+        priceArbitrageur = CLPriceArbitrageur(_newArbitrageur);
+        emit PriceArbitrageurUpdated(oldArbitrageur, _newArbitrageur);
     }
 
     /*//////////////////////////////////////////////////////////////

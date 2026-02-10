@@ -504,27 +504,15 @@ contract CLPriceArbitrageurTest is Test {
     function test_uniswapV3SwapCallback_AuthorizedPool() public {
         address fakePool = address(0xBEEF);
 
-        // Mock factory: tickSpacing=200 returns fakePool
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(200)
-        ), abi.encode(fakePool));
-        // Other spacings return address(0)
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(1)
-        ), abi.encode(address(0)));
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(50)
-        ), abi.encode(address(0)));
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(100)
-        ), abi.encode(address(0)));
+        // Set _expectedPool (slot 0) to fakePool — simulates active fixPoolPrice execution
+        vm.store(address(arbitrageur), bytes32(0), bytes32(uint256(uint160(fakePool))));
 
         // Fund arbitrageur with tokens (it needs tokens to transfer in callback)
         _fundWithDust(address(arbitrageur), 100);
 
         bytes memory data = abi.encode(token0, token1);
 
-        // Call from authorized pool address should succeed
+        // Call from the expected pool address should succeed
         vm.prank(fakePool);
         arbitrageur.uniswapV3SwapCallback(1, 0, data);
 
@@ -533,25 +521,14 @@ contract CLPriceArbitrageurTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-              TEST: CALLBACK WITH TICK_SPACING=1
+              TEST: CALLBACK WITH EXPECTED POOL (token1)
     //////////////////////////////////////////////////////////////*/
 
-    function test_uniswapV3SwapCallback_TickSpacing1() public {
+    function test_uniswapV3SwapCallback_ExpectedPool() public {
         address fakePool = address(0xCAFE);
 
-        // Mock factory: tickSpacing=1 returns fakePool
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(1)
-        ), abi.encode(fakePool));
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(50)
-        ), abi.encode(address(0)));
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(100)
-        ), abi.encode(address(0)));
-        vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(200)
-        ), abi.encode(address(0)));
+        // Set _expectedPool (slot 0) to fakePool
+        vm.store(address(arbitrageur), bytes32(0), bytes32(uint256(uint160(fakePool))));
 
         _fundWithDust(address(arbitrageur), 100);
         bytes memory data = abi.encode(token0, token1);
