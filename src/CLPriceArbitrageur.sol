@@ -121,9 +121,9 @@ contract CLPriceArbitrageur {
             }
         }
 
-        // Record caller balances before transferFrom to compute precise spend
-        uint256 callerBal0Before = IERC20(token0).balanceOf(msg.sender);
-        uint256 callerBal1Before = IERC20(token1).balanceOf(msg.sender);
+        // Snapshot arbitrageur balances before pulling dust (to isolate from external donations)
+        uint256 arbBal0Before = IERC20(token0).balanceOf(address(this));
+        uint256 arbBal1Before = IERC20(token1).balanceOf(address(this));
 
         // Transfer dust tokens from caller
         IERC20(token0).transferFrom(msg.sender, address(this), dustAmount);
@@ -193,23 +193,25 @@ contract CLPriceArbitrageur {
 
         clPositionManager.burn(dustTokenId);
 
-        // Step 5: Return remaining tokens to caller
-        uint256 bal0 = IERC20(token0).balanceOf(address(this));
-        uint256 bal1 = IERC20(token1).balanceOf(address(this));
-        if (bal0 > 0) IERC20(token0).transfer(msg.sender, bal0);
-        if (bal1 > 0) IERC20(token1).transfer(msg.sender, bal1);
+        // Step 5: Snapshot arbitrageur balances after burn to compute refund
+        uint256 arbBal0After = IERC20(token0).balanceOf(address(this));
+        uint256 arbBal1After = IERC20(token1).balanceOf(address(this));
+
+        // Return remaining tokens to caller (includes any pre-existing donations)
+        if (arbBal0After > 0) IERC20(token0).transfer(msg.sender, arbBal0After);
+        if (arbBal1After > 0) IERC20(token1).transfer(msg.sender, arbBal1After);
 
         // H-02: Verify target price was actually reached after dust swap
         // If dust amount was insufficient to overcome attacker's liquidity, revert
         (uint160 postSwapPrice,,,,,) = ICLPool(pool).slot0();
         if (postSwapPrice != targetSqrtPrice) revert PriceNotReached();
 
-        // Compute actual tokens spent by comparing caller balances
-        // If caller ended up with more tokens (net gain from swap output), spent is 0
-        uint256 callerBal0After = IERC20(token0).balanceOf(msg.sender);
-        uint256 callerBal1After = IERC20(token1).balanceOf(msg.sender);
-        spent0 = callerBal0After < callerBal0Before ? callerBal0Before - callerBal0After : 0;
-        spent1 = callerBal1After < callerBal1Before ? callerBal1Before - callerBal1After : 0;
+        // Compute actual tokens spent using arbitrageur balance deltas (immune to donations)
+        // refund = tokens returned to arbitrageur after mint+swap+collect minus pre-existing balance
+        uint256 refund0 = arbBal0After > arbBal0Before ? arbBal0After - arbBal0Before : 0;
+        uint256 refund1 = arbBal1After > arbBal1Before ? arbBal1After - arbBal1Before : 0;
+        spent0 = dustAmount > refund0 ? dustAmount - refund0 : 0;
+        spent1 = dustAmount > refund1 ? dustAmount - refund1 : 0;
 
         emit PoolPriceArbitraged(pool, originalSqrtPrice, targetSqrtPrice);
     }

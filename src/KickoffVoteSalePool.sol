@@ -914,8 +914,8 @@ contract KickoffVoteSalePool is IERC721Receiver {
 
                 // M-01 fix: Subtract only the actual tokens spent on arbitrage (not the full dustAmount).
                 // fixPoolPrice returns precise spend after returning unused tokens to caller.
-                if (amount0 > spent0) amount0 -= spent0;
-                if (amount1 > spent1) amount1 -= spent1;
+                amount0 = amount0 > spent0 ? amount0 - spent0 : 0;
+                amount1 = amount1 > spent1 ? amount1 - spent1 : 0;
             }
         }
 
