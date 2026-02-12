@@ -441,43 +441,46 @@ contract CLPriceArbitrageurTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-              TEST: DUST MINT FAILURE (zero liquidity)
+              TEST: DIRECT SWAP WITHOUT MINT (replaces dust mint tests)
     //////////////////////////////////////////////////////////////*/
 
-    function test_fixPoolPrice_RevertOnZeroLiquidity() public {
+    function test_fixPoolPrice_WorksWithoutMint() public {
+        // Previously tested DustArbitrageFailed on zero liquidity mint.
+        // Now verifies fixPoolPrice works via direct swap without any mint.
         MockCLPool pool = _createMockPool(PRICE_4_TO_1);
 
         _fundWithDust(address(this), 1000);
         IERC20(token0).approve(address(arbitrageur), 1000);
         IERC20(token1).approve(address(arbitrageur), 1000);
 
-        // Mock mint returning zero liquidity
-        vm.mockCall(CL_POSITION_MANAGER, abi.encodeWithSelector(
-            INonfungiblePositionManager.mint.selector
-        ), abi.encode(uint256(1), uint128(0), uint256(0), uint256(0)));
-
-        vm.expectRevert(CLPriceArbitrageur.DustArbitrageFailed.selector);
+        // No position manager mocks needed — direct swap approach
         arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
+
+        (uint160 newPrice,,,,,) = ICLPool(address(pool)).slot0();
+        assertEq(newPrice, PRICE_1_TO_1, "Pool price should be corrected without mint");
     }
 
     /*//////////////////////////////////////////////////////////////
-              TEST: DUST MINT FAILURE (zero tokenId)
+              TEST: ONLY INPUT TOKEN IS TRANSFERRED FROM CALLER
     //////////////////////////////////////////////////////////////*/
 
-    function test_fixPoolPrice_RevertOnZeroTokenId() public {
-        MockCLPool pool = _createMockPool(PRICE_4_TO_1);
+    function test_fixPoolPrice_OnlyInputTokenTransferred() public {
+        // For !zeroForOne (price too low → push up): only token1 should be pulled from caller
+        MockCLPool pool = _createMockPool(PRICE_025_TO_1);
 
         _fundWithDust(address(this), 1000);
         IERC20(token0).approve(address(arbitrageur), 1000);
         IERC20(token1).approve(address(arbitrageur), 1000);
 
-        // Mock mint returning zero tokenId
-        vm.mockCall(CL_POSITION_MANAGER, abi.encodeWithSelector(
-            INonfungiblePositionManager.mint.selector
-        ), abi.encode(uint256(0), uint128(1), uint256(1), uint256(1)));
+        uint256 bal0Before = IERC20(token0).balanceOf(address(this));
 
-        vm.expectRevert(CLPriceArbitrageur.DustArbitrageFailed.selector);
         arbitrageur.fixPoolPrice(address(pool), token0, token1, PRICE_1_TO_1, 200, 1000);
+
+        uint256 bal0After = IERC20(token0).balanceOf(address(this));
+
+        // token0 is NOT the input token for !zeroForOne, so caller's token0 should not decrease
+        // (it may increase by 1 wei due to mock swap output)
+        assertGe(bal0After, bal0Before, "token0 should not decrease when it's not the input token");
     }
 
     /*//////////////////////////////////////////////////////////////

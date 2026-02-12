@@ -45,6 +45,9 @@ contract LPLocker is IERC721Receiver {
     error NotVoteSalePool();
     error NotDeployer();
     error InvalidPosition();
+    error NotPendingAdmin();
+    error NotPendingProjectOwner();
+    error NoPendingTransfer();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -80,6 +83,11 @@ contract LPLocker is IERC721Receiver {
         address token,
         uint256 amount
     );
+
+    event AdminTransferStarted(address indexed votePool, address indexed currentAdmin, address indexed newAdmin);
+    event AdminTransferred(address indexed votePool, address indexed previousAdmin, address indexed newAdmin);
+    event ProjectOwnerTransferStarted(address indexed votePool, address indexed currentOwner, address indexed newOwner);
+    event ProjectOwnerTransferred(address indexed votePool, address indexed previousOwner, address indexed newOwner);
 
     /*//////////////////////////////////////////////////////////////
                                  STRUCTS
@@ -133,6 +141,12 @@ contract LPLocker is IERC721Receiver {
     
     /// @notice Accrued fees per votePool per token (pull-based)
     mapping(address => mapping(address => AccruedFees)) public accruedFees;
+
+    /// @notice Pending admin address for 2-step transfer (votePool → pending admin)
+    mapping(address => address) public pendingAdmin;
+
+    /// @notice Pending project owner address for 2-step transfer (votePool → pending owner)
+    mapping(address => address) public pendingProjectOwner;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -304,6 +318,84 @@ contract LPLocker is IERC721Receiver {
         if (!success || (data.length > 0 && !abi.decode(data, (bool)))) {
             revert TransferFailed();
         }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      2-STEP ADMIN / PROJECT OWNER TRANSFER
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Initiate admin transfer for a vote pool (step 1 of 2)
+    /// @param votePool The vote pool address
+    /// @param newAdmin The new admin address
+    function transferAdmin(address votePool, address newAdmin) external {
+        LockedPosition storage pool = lockedPools[votePool];
+        if (!pool.exists) revert PoolNotFound();
+        if (msg.sender != pool.admin) revert NotAuthorized();
+        if (newAdmin == address(0)) revert ZeroAddress();
+
+        pendingAdmin[votePool] = newAdmin;
+        emit AdminTransferStarted(votePool, msg.sender, newAdmin);
+    }
+
+    /// @notice Accept admin transfer for a vote pool (step 2 of 2)
+    /// @param votePool The vote pool address
+    function acceptAdmin(address votePool) external {
+        if (pendingAdmin[votePool] != msg.sender) revert NotPendingAdmin();
+
+        LockedPosition storage pool = lockedPools[votePool];
+        address previousAdmin = pool.admin;
+        pool.admin = msg.sender;
+        pendingAdmin[votePool] = address(0);
+
+        emit AdminTransferred(votePool, previousAdmin, msg.sender);
+    }
+
+    /// @notice Cancel a pending admin transfer
+    /// @param votePool The vote pool address
+    function cancelAdminTransfer(address votePool) external {
+        LockedPosition storage pool = lockedPools[votePool];
+        if (!pool.exists) revert PoolNotFound();
+        if (msg.sender != pool.admin) revert NotAuthorized();
+        if (pendingAdmin[votePool] == address(0)) revert NoPendingTransfer();
+
+        pendingAdmin[votePool] = address(0);
+    }
+
+    /// @notice Initiate project owner transfer for a vote pool (step 1 of 2)
+    /// @param votePool The vote pool address
+    /// @param newProjectOwner The new project owner address
+    function transferProjectOwner(address votePool, address newProjectOwner) external {
+        LockedPosition storage pool = lockedPools[votePool];
+        if (!pool.exists) revert PoolNotFound();
+        if (msg.sender != pool.projectOwner) revert NotAuthorized();
+        if (newProjectOwner == address(0)) revert ZeroAddress();
+
+        pendingProjectOwner[votePool] = newProjectOwner;
+        emit ProjectOwnerTransferStarted(votePool, msg.sender, newProjectOwner);
+    }
+
+    /// @notice Accept project owner transfer for a vote pool (step 2 of 2)
+    /// @param votePool The vote pool address
+    function acceptProjectOwner(address votePool) external {
+        if (pendingProjectOwner[votePool] != msg.sender) revert NotPendingProjectOwner();
+
+        LockedPosition storage pool = lockedPools[votePool];
+        address previousOwner = pool.projectOwner;
+        pool.projectOwner = msg.sender;
+        pendingProjectOwner[votePool] = address(0);
+
+        emit ProjectOwnerTransferred(votePool, previousOwner, msg.sender);
+    }
+
+    /// @notice Cancel a pending project owner transfer
+    /// @param votePool The vote pool address
+    function cancelProjectOwnerTransfer(address votePool) external {
+        LockedPosition storage pool = lockedPools[votePool];
+        if (!pool.exists) revert PoolNotFound();
+        if (msg.sender != pool.projectOwner) revert NotAuthorized();
+        if (pendingProjectOwner[votePool] == address(0)) revert NoPendingTransfer();
+
+        pendingProjectOwner[votePool] = address(0);
     }
 
     /*//////////////////////////////////////////////////////////////

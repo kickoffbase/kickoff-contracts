@@ -12,8 +12,8 @@ import {TickMathLib} from "./libraries/TickMathLib.sol";
 /// @dev Used by KickoffVoteSalePool to correct pool price when someone front-runs pool creation
 /// @dev Stateless - can be shared across all vote-sale pools
 /// @dev Flow: caller approves dustAmount of each token → calls fixPoolPrice() →
-///      arbitrageur transferFrom's dust tokens, adds dust liquidity, swaps to target price,
-///      cleans up dust position, and returns remaining tokens to caller
+///      arbitrageur transferFrom's only the input token, performs direct swap to target price,
+///      and returns remaining tokens to caller
 contract CLPriceArbitrageur {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -59,30 +59,32 @@ contract CLPriceArbitrageur {
                             MAIN FUNCTION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Fix a CL pool's price via dust arbitrage
+    /// @notice Fix a CL pool's price via direct swap (no dust liquidity mint)
     /// @dev Caller must approve `dustAmount` of both token0 and token1 to this contract before calling.
+    ///      Only the input token (determined by swap direction) is actually transferred.
     ///      Admin specifies dustAmount in wei each time — use a small value (e.g. 1000) for normal cases,
     ///      or increase if the attacker added liquidity to the pool and the swap can't reach the target.
+    /// @dev In empty pools, the swap traverses zero-liquidity ticks for free (0 tokens consumed).
+    ///      If an attacker front-ran with liquidity, dustAmount serves as the budget to push through it.
     /// @dev H-01 fix: If pool tick is in the tail zone (outside ±887200 but within canonical ±887272),
-    ///      performs a free swap through the guaranteed-empty tail zone first, then proceeds with dust arbitrage.
+    ///      performs a free swap through the guaranteed-empty tail zone first, then proceeds with price fix.
     ///      The tail zone has zero liquidity by definition (no tickSpacing=200 position can cover it),
     ///      so the swap costs zero tokens.
-    /// @dev H-02 fix: After the dust swap, verifies that the target price was actually reached.
+    /// @dev H-02 fix: After the swap, verifies that the target price was actually reached.
     ///      Reverts with PriceNotReached() if the dust amount was insufficient.
     /// @param pool The existing CL pool address
     /// @param token0 The pool's token0 address (sorted)
     /// @param token1 The pool's token1 address (sorted)
     /// @param targetSqrtPrice The desired sqrtPriceX96 (fair price)
-    /// @param tickSpacing The pool's tick spacing
-    /// @param dustAmount Amount of each token (in wei) to use for dust arbitrage
-    /// @return spent0 Actual amount of token0 spent (dustAmount minus returned remainder)
-    /// @return spent1 Actual amount of token1 spent (dustAmount minus returned remainder)
+    /// @param dustAmount Amount of input token (in wei) to use for price arbitrage
+    /// @return spent0 Actual amount of token0 spent (0 if swap direction is !zeroForOne)
+    /// @return spent1 Actual amount of token1 spent (0 if swap direction is zeroForOne)
     function fixPoolPrice(
         address pool,
         address token0,
         address token1,
         uint160 targetSqrtPrice,
-        int24 tickSpacing,
+        int24, // tickSpacing (kept for interface compatibility)
         uint256 dustAmount
     ) external returns (uint256 spent0, uint256 spent1) {
         // Read current price
@@ -121,46 +123,23 @@ contract CLPriceArbitrageur {
             }
         }
 
+        // Determine swap direction
+        bool zeroForOne = currentSqrtPrice > targetSqrtPrice;
+
         // Snapshot arbitrageur balances before pulling dust (to isolate from external donations)
         uint256 arbBal0Before = IERC20(token0).balanceOf(address(this));
         uint256 arbBal1Before = IERC20(token1).balanceOf(address(this));
 
-        // Transfer dust tokens from caller
-        IERC20(token0).transferFrom(msg.sender, address(this), dustAmount);
-        IERC20(token1).transferFrom(msg.sender, address(this), dustAmount);
+        // Transfer only the input token from caller (not both — output token is not needed).
+        // For empty pools, the swap traverses zero-liquidity ticks for free (0 tokens consumed).
+        // If attacker added liquidity, dustAmount serves as the budget to push through it.
+        if (zeroForOne) {
+            IERC20(token0).transferFrom(msg.sender, address(this), dustAmount);
+        } else {
+            IERC20(token1).transferFrom(msg.sender, address(this), dustAmount);
+        }
 
-        // Determine swap direction
-        bool zeroForOne = currentSqrtPrice > targetSqrtPrice;
-
-        // Step 1: Calculate tick range covering the price path
-        int24 tickA = TickMathLib.getTickAtSqrtRatio(currentSqrtPrice);
-        int24 tickB = TickMathLib.getTickAtSqrtRatio(targetSqrtPrice);
-        
-        (int24 tickLower, int24 tickUpper) = _calculateTickRange(tickA, tickB, tickSpacing);
-
-        // Step 2: Add dust concentrated liquidity to enable the swap
-        IERC20(token0).approve(address(clPositionManager), dustAmount);
-        IERC20(token1).approve(address(clPositionManager), dustAmount);
-
-        INonfungiblePositionManager.MintParams memory dustParams = INonfungiblePositionManager.MintParams({
-            token0: token0,
-            token1: token1,
-            tickSpacing: tickSpacing,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            amount0Desired: dustAmount,
-            amount1Desired: dustAmount,
-            amount0Min: 0,
-            amount1Min: 0,
-            recipient: address(this),
-            deadline: block.timestamp,
-            sqrtPriceX96: 0 // Pool already exists
-        });
-
-        (uint256 dustTokenId, uint128 dustLiquidity,,) = clPositionManager.mint(dustParams);
-        if (dustTokenId == 0 || dustLiquidity == 0) revert DustArbitrageFailed();
-
-        // Step 3: Swap to move price to target
+        // Direct swap to move price to target (no dust liquidity mint needed)
         _expectedPool = pool;
         ICLPool(pool).swap(
             address(this),
@@ -171,47 +150,30 @@ contract CLPriceArbitrageur {
         );
         _expectedPool = address(0);
 
-        // Step 4: Remove dust position
-        clPositionManager.decreaseLiquidity(
-            INonfungiblePositionManager.DecreaseLiquidityParams({
-                tokenId: dustTokenId,
-                liquidity: dustLiquidity,
-                amount0Min: 0,
-                amount1Min: 0,
-                deadline: block.timestamp
-            })
-        );
-
-        clPositionManager.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: dustTokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
-            })
-        );
-
-        clPositionManager.burn(dustTokenId);
-
-        // Step 5: Snapshot arbitrageur balances after burn to compute refund
-        uint256 arbBal0After = IERC20(token0).balanceOf(address(this));
-        uint256 arbBal1After = IERC20(token1).balanceOf(address(this));
-
-        // Return remaining tokens to caller (includes any pre-existing donations)
-        if (arbBal0After > 0) IERC20(token0).transfer(msg.sender, arbBal0After);
-        if (arbBal1After > 0) IERC20(token1).transfer(msg.sender, arbBal1After);
-
-        // H-02: Verify target price was actually reached after dust swap
+        // H-02: Verify target price was actually reached after swap
         // If dust amount was insufficient to overcome attacker's liquidity, revert
         (uint160 postSwapPrice,,,,,) = ICLPool(pool).slot0();
         if (postSwapPrice != targetSqrtPrice) revert PriceNotReached();
 
-        // Compute actual tokens spent using arbitrageur balance deltas (immune to donations)
-        // refund = tokens returned to arbitrageur after mint+swap+collect minus pre-existing balance
-        uint256 refund0 = arbBal0After > arbBal0Before ? arbBal0After - arbBal0Before : 0;
-        uint256 refund1 = arbBal1After > arbBal1Before ? arbBal1After - arbBal1Before : 0;
-        spent0 = dustAmount > refund0 ? dustAmount - refund0 : 0;
-        spent1 = dustAmount > refund1 ? dustAmount - refund1 : 0;
+        // Snapshot arbitrageur balances after swap
+        uint256 arbBal0After = IERC20(token0).balanceOf(address(this));
+        uint256 arbBal1After = IERC20(token1).balanceOf(address(this));
+
+        // Return tokens to caller: remaining input + any swap output
+        // Uses delta from pre-existing balance to avoid draining external donations
+        uint256 return0 = arbBal0After > arbBal0Before ? arbBal0After - arbBal0Before : 0;
+        uint256 return1 = arbBal1After > arbBal1Before ? arbBal1After - arbBal1Before : 0;
+        if (return0 > 0) IERC20(token0).transfer(msg.sender, return0);
+        if (return1 > 0) IERC20(token1).transfer(msg.sender, return1);
+
+        // Compute actual tokens spent (only the input token can have positive spend)
+        if (zeroForOne) {
+            spent0 = dustAmount > return0 ? dustAmount - return0 : 0;
+            spent1 = 0;
+        } else {
+            spent0 = 0;
+            spent1 = dustAmount > return1 ? dustAmount - return1 : 0;
+        }
 
         emit PoolPriceArbitraged(pool, originalSqrtPrice, targetSqrtPrice);
     }
