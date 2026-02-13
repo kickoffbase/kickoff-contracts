@@ -102,12 +102,20 @@ contract CLPriceArbitrageur {
             int24 oldTick = currentTick;
             bool tailZeroForOne = currentTick > CL_MAX_TICK;
 
+            // Compute the boundary of the empty tail zone.
+            // The swap must stop AT the boundary (tick ±887200), not continue into the normal range
+            // where attacker liquidity may exist. The arbitrageur has no tokens yet (transferFrom
+            // happens later), so any callback demanding tokens would revert.
+            uint160 tailBoundary = tailZeroForOne
+                ? TickMathLib.getSqrtRatioAtTick(CL_MAX_TICK)   // stop AT tick +887200
+                : TickMathLib.getSqrtRatioAtTick(CL_MIN_TICK);  // stop AT tick -887200
+
             _expectedPool = pool;
             ICLPool(pool).swap(
                 address(this),
                 tailZeroForOne,
                 int256(1), // Minimal amountSpecified (pool requires != 0)
-                targetSqrtPrice,
+                tailBoundary,
                 abi.encode(token0, token1)
             );
             _expectedPool = address(0);
