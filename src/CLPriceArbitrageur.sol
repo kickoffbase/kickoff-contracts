@@ -51,9 +51,9 @@ contract CLPriceArbitrageur {
     /// @notice Aerodrome Slipstream CL Factory on Base mainnet
     ICLFactory public constant clFactory = ICLFactory(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A);
 
-    /// @notice Full-range tick bounds (for clamping)
-    int24 public constant CL_MIN_TICK = -887200;
-    int24 public constant CL_MAX_TICK = 887200;
+    /// @notice Full-range tick bounds (floor(887272/2000)*2000 = 886000)
+    int24 public constant CL_MIN_TICK = -886000;
+    int24 public constant CL_MAX_TICK = 886000;
 
     /*//////////////////////////////////////////////////////////////
                             MAIN FUNCTION
@@ -66,9 +66,9 @@ contract CLPriceArbitrageur {
     ///      or increase if the attacker added liquidity to the pool and the swap can't reach the target.
     /// @dev In empty pools, the swap traverses zero-liquidity ticks for free (0 tokens consumed).
     ///      If an attacker front-ran with liquidity, dustAmount serves as the budget to push through it.
-    /// @dev H-01 fix: If pool tick is in the tail zone (outside ±887200 but within canonical ±887272),
+    /// @dev H-01 fix: If pool tick is in the tail zone (outside ±886000 but within canonical ±887272),
     ///      performs a free swap through the guaranteed-empty tail zone first, then proceeds with price fix.
-    ///      The tail zone has zero liquidity by definition (no tickSpacing=200 position can cover it),
+    ///      The tail zone has zero liquidity by definition (no tickSpacing=2000 position can cover it),
     ///      so the swap costs zero tokens.
     /// @dev H-02 fix: After the swap, verifies that the target price was actually reached.
     ///      Reverts with PriceNotReached() if the dust amount was insufficient.
@@ -95,20 +95,20 @@ contract CLPriceArbitrageur {
 
         // H-01: If current tick is in the tail zone (outside tickSpacing-aligned bounds),
         // perform a free swap to bring the price back into the supported range.
-        // The tail zone [887201..887271] and [-887272..-887201] has ZERO active liquidity
-        // because no tickSpacing=200 position can cover those ticks. The swap traverses
+        // The tail zone [886001..887271] and [-887272..-886001] has ZERO active liquidity
+        // because no tickSpacing=2000 position can cover those ticks. The swap traverses
         // the empty bitmap for free (0 tokens consumed).
         if (currentTick > CL_MAX_TICK || currentTick < CL_MIN_TICK) {
             int24 oldTick = currentTick;
             bool tailZeroForOne = currentTick > CL_MAX_TICK;
 
             // Compute the boundary of the empty tail zone.
-            // The swap must stop AT the boundary (tick ±887200), not continue into the normal range
+            // The swap must stop AT the boundary (tick ±886000), not continue into the normal range
             // where attacker liquidity may exist. The arbitrageur has no tokens yet (transferFrom
             // happens later), so any callback demanding tokens would revert.
             uint160 tailBoundary = tailZeroForOne
-                ? TickMathLib.getSqrtRatioAtTick(CL_MAX_TICK)   // stop AT tick +887200
-                : TickMathLib.getSqrtRatioAtTick(CL_MIN_TICK);  // stop AT tick -887200
+                ? TickMathLib.getSqrtRatioAtTick(CL_MAX_TICK)   // stop AT tick +886000
+                : TickMathLib.getSqrtRatioAtTick(CL_MIN_TICK);  // stop AT tick -886000
 
             _expectedPool = pool;
             ICLPool(pool).swap(

@@ -70,8 +70,8 @@ contract MockNonfungiblePositionManager {
             token0: token0,
             token1: token1,
             tickSpacing: tickSpacing,
-            tickLower: -887200,
-            tickUpper: 887200,
+            tickLower: -886000,
+            tickUpper: 886000,
             liquidity: liquidity,
             tokensOwed0: 0,
             tokensOwed1: 0

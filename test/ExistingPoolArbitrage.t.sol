@@ -87,7 +87,7 @@ contract MockCLPoolForArbitrage {
         }
     }
 
-    function tickSpacing() external pure returns (int24) { return 200; }
+    function tickSpacing() external pure returns (int24) { return 2000; }
     function liquidity() external pure returns (uint128) { return 0; }
     function fee() external pure returns (uint24) { return 10000; }
 }
@@ -259,7 +259,7 @@ contract ExistingPoolArbitrageTest is Test {
 
         // Mock CL factory getPool to return our mock pool
         vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(200)
+            ICLFactory.getPool.selector, token0, token1, int24(2000)
         ), abi.encode(address(mockPool)));
 
         // Mock other tick spacings to return address(0) (for callback validation)
@@ -278,7 +278,7 @@ contract ExistingPoolArbitrageTest is Test {
     function _mockNoExistingPool() internal {
         (address token0, address token1) = _getSortedTokens();
         vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(200)
+            ICLFactory.getPool.selector, token0, token1, int24(2000)
         ), abi.encode(address(0)));
     }
 
@@ -484,21 +484,21 @@ contract ExistingPoolArbitrageTest is Test {
               TEST 9: MULTIPLE POOLS - ONLY MATCHING TICK SPACING
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice CL factory returns pool only for matching tick spacing (200)
+    /// @notice CL factory returns pool only for matching tick spacing (2000)
     function test_addLiquidity_PoolFoundOnlyForCorrectTickSpacing() public {
         _advanceToFinalizing();
 
         (address token0, address token1) = _getSortedTokens();
 
-        // Only mock tick spacing 200 to return a pool
+        // Only mock tick spacing 2000 to return a pool
         uint160 manipulatedPrice = 158456325028528675187087900672;
         MockCLPoolForArbitrage mockPool = new MockCLPoolForArbitrage(token0, token1, manipulatedPrice);
         MockERC20(token0).mint(address(mockPool), 10_000);
         MockERC20(token1).mint(address(mockPool), 10_000);
 
-        // Tick spacing 200 → existing pool
+        // Tick spacing 2000 → existing pool
         vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, token0, token1, int24(200)
+            ICLFactory.getPool.selector, token0, token1, int24(2000)
         ), abi.encode(address(mockPool)));
 
         // Other tick spacings → no pool
@@ -713,7 +713,7 @@ contract ExistingPoolArbitrageTest is Test {
         MockERC20(t1).mint(address(mockPool), 10_000);
 
         vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
-            ICLFactory.getPool.selector, t0, t1, int24(200)
+            ICLFactory.getPool.selector, t0, t1, int24(2000)
         ), abi.encode(address(mockPool)));
         vm.mockCall(CL_FACTORY, abi.encodeWithSelector(
             ICLFactory.getPool.selector, t0, t1, int24(1)

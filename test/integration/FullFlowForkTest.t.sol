@@ -481,7 +481,7 @@ contract FullFlowForkTest is Test {
             ISlipstreamSwapRouter.ExactInputSingleParams memory paramsIn = ISlipstreamSwapRouter.ExactInputSingleParams({
                 tokenIn: WETH,
                 tokenOut: address(projectToken),
-                tickSpacing: 200, // 1% fee tier
+                tickSpacing: 2000, // 1% fee tier
                 recipient: trader,
                 deadline: block.timestamp + 60,
                 amountIn: wethIn,
@@ -501,7 +501,7 @@ contract FullFlowForkTest is Test {
                 ISlipstreamSwapRouter.ExactInputSingleParams memory paramsOut = ISlipstreamSwapRouter.ExactInputSingleParams({
                     tokenIn: address(projectToken),
                     tokenOut: WETH,
-                    tickSpacing: 200,
+                    tickSpacing: 2000,
                     recipient: trader,
                     deadline: block.timestamp + 60,
                     amountIn: tokenBack,

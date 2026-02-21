@@ -303,12 +303,12 @@ contract KickoffVoteSalePool is IERC721Receiver {
     /// @notice Aerodrome Slipstream CL Factory on Base mainnet
     ICLFactory public constant clFactory = ICLFactory(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A);
 
-    /// @notice Tick spacing for 1% fee tier in Slipstream
-    int24 public constant CL_TICK_SPACING = 200;
+    /// @notice Tick spacing for 1% fee tier in Slipstream (tickSpacingToFee(2000) = 10000)
+    int24 public constant CL_TICK_SPACING = 2000;
 
-    /// @notice Full-range tick bounds for 1% fee tier (rounded to tickSpacing)
-    int24 public constant CL_MIN_TICK = -887200;
-    int24 public constant CL_MAX_TICK = 887200;
+    /// @notice Full-range tick bounds for 1% fee tier (floor(887272/2000)*2000 = 886000)
+    int24 public constant CL_MIN_TICK = -886000;
+    int24 public constant CL_MAX_TICK = 886000;
 
     /// @notice USDC balance before finalization started (for accurate reward tracking)
     uint256 private usdcBeforeFinalization;

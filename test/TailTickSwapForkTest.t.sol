@@ -19,10 +19,10 @@ contract TailTickSwapForkTest is Test {
 
     // ============ TICK CONSTANTS ============
     int24 constant CL_TICK_SPACING = 200;
-    int24 constant CL_MIN_TICK = -887200; // Max aligned to tickSpacing=200
-    int24 constant CL_MAX_TICK = 887200;
+    int24 constant CL_MIN_TICK = -886000; // Max aligned to tickSpacing=2000
+    int24 constant CL_MAX_TICK = 886000;
     // Canonical TickMath bounds: [-887272, 887272]
-    // Tail zones: (887200, 887272] and [-887272, -887200)
+    // Tail zones: (886000, 887272] and [-887272, -886000)
 
     // ============ STATE ============
     ICLFactory clFactory = ICLFactory(CL_FACTORY);
@@ -73,7 +73,7 @@ contract TailTickSwapForkTest is Test {
         console.log("  liquidity:", uint256(liq));
     }
 
-    // ============ TEST 1: Swap through UPPER tail zone (tick > 887200) ============
+    // ============ TEST 1: Swap through UPPER tail zone (tick > 886000) ============
 
     /// @notice Hostile pool at tick 887201 — swap should bring price back into range for free
     function test_swapThroughUpperTailZone() public {
@@ -91,7 +91,7 @@ contract TailTickSwapForkTest is Test {
 
         // Verify tick is in the tail zone
         (, int24 tickBefore,,,,) = ICLPool(pool).slot0();
-        assertTrue(tickBefore > CL_MAX_TICK, "Tick should be above CL_MAX_TICK (887200)");
+        assertTrue(tickBefore > CL_MAX_TICK, "Tick should be above CL_MAX_TICK (886000)");
 
         // Step 2: Determine swap direction and target
         // Tick 887201 is above range → need to push price DOWN → zeroForOne = true
@@ -143,7 +143,7 @@ contract TailTickSwapForkTest is Test {
         assertTrue(tickAfter >= CL_MIN_TICK && tickAfter <= CL_MAX_TICK, "Tick should be in supported range");
     }
 
-    // ============ TEST 2: Swap through LOWER tail zone (tick < -887200) ============
+    // ============ TEST 2: Swap through LOWER tail zone (tick < -886000) ============
 
     /// @notice Hostile pool at tick -887201 — swap should bring price back into range for free
     function test_swapThroughLowerTailZone() public {
@@ -161,7 +161,7 @@ contract TailTickSwapForkTest is Test {
 
         // Verify tick is in the tail zone
         (, int24 tickBefore,,,,) = ICLPool(pool).slot0();
-        assertTrue(tickBefore < CL_MIN_TICK, "Tick should be below CL_MIN_TICK (-887200)");
+        assertTrue(tickBefore < CL_MIN_TICK, "Tick should be below CL_MIN_TICK (-886000)");
 
         // Step 2: Swap direction — need to push price UP → zeroForOne = false
         uint160 targetSqrtPrice = TickMathLib.getSqrtRatioAtTick(0);

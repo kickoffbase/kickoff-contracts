@@ -76,7 +76,7 @@ contract MockCLPool {
 
     function token0() external view returns (address) { return token0Addr; }
     function token1() external view returns (address) { return token1Addr; }
-    function tickSpacing() external pure returns (int24) { return 200; }
+    function tickSpacing() external pure returns (int24) { return 2000; }
     function liquidity() external pure returns (uint128) { return 0; }
 }
 
