@@ -229,13 +229,13 @@ Replace `https://sepolia.base.org` with `https://mainnet.base.org`
 
 | Contract | Address | Basescan |
 |----------|---------|----------|
-| **CLPriceArbitrageur** | `0xCE38740E855a90979fE2f5257E0aD08A5Ce5eC57` | [View](https://basescan.org/address/0xCE38740E855a90979fE2f5257E0aD08A5Ce5eC57) |
-| **VoteSalePoolDeployer** | `0xA6F260123a88EADd827c5deA45eF0C27AE5b308e` | [View](https://basescan.org/address/0xA6F260123a88EADd827c5deA45eF0C27AE5b308e) |
-| **KickoffFactory** | `0x8d39731a92C0326B3345395d6a285Df16E7334AB` | [View](https://basescan.org/address/0x8d39731a92C0326B3345395d6a285Df16E7334AB) |
-| **LPLocker** | `0xa45939e2546a21c4219903E8E858d31f256fD94c` | [View](https://basescan.org/address/0xa45939e2546a21c4219903E8E858d31f256fD94c) |
-| **KickoffPoolReader** | `0x48Af892817d297D913bE0aB5ba9e4308462386DE` | [View](https://basescan.org/address/0x48Af892817d297D913bE0aB5ba9e4308462386DE) |
-| **TokenVesting** | `0x88f9c2f77409deeAbF0140856CF9f0a098DEc942` | [View](https://basescan.org/address/0x88f9c2f77409deeAbF0140856CF9f0a098DEc942) |
-| **ProjectTokenFactory** | `0x3857C4571a1e481b526D979EEd3Df16CF209ee3D` | [View](https://basescan.org/address/0x3857C4571a1e481b526D979EEd3Df16CF209ee3D) |
+| **CLPriceArbitrageur** | `0xb285c6fe5E5A9d777b47b08Ef9F5cF68c573576D` | [View](https://basescan.org/address/0xb285c6fe5E5A9d777b47b08Ef9F5cF68c573576D) |
+| **VoteSalePoolDeployer** | `0xC0d8eB2309860761879b01AAcdeBEeF84a76C025` | [View](https://basescan.org/address/0xC0d8eB2309860761879b01AAcdeBEeF84a76C025) |
+| **KickoffFactory** | `0x85f85603D374c398c8fc2459917719D7aE1e9383` | [View](https://basescan.org/address/0x85f85603D374c398c8fc2459917719D7aE1e9383) |
+| **LPLocker** | `0x19842164463241092ab1b00f6EF62e4A172730c6` | [View](https://basescan.org/address/0x19842164463241092ab1b00f6EF62e4A172730c6) |
+| **KickoffPoolReader** | `0x8Da8b2252070B0E1e2565CbABAC8478a3614CDf1` | [View](https://basescan.org/address/0x8Da8b2252070B0E1e2565CbABAC8478a3614CDf1) |
+| **TokenVesting** | `0x3628ADBDCb26A17CA2359bf4795B212261Af24Cb` | [View](https://basescan.org/address/0x3628ADBDCb26A17CA2359bf4795B212261Af24Cb) |
+| **ProjectTokenFactory** | `0x72F40B3fF806347D8A8D8AECe2125ee7e6C424e8` | [View](https://basescan.org/address/0x72F40B3fF806347D8A8D8AECe2125ee7e6C424e8) |
 
 ## Usage
 
