@@ -10,6 +10,7 @@ import {KickoffPoolReader} from "../src/KickoffPoolReader.sol";
 import {LPLocker} from "../src/LPLocker.sol";
 import {TokenVesting} from "../src/TokenVesting.sol";
 import {ProjectTokenFactory} from "../src/ProjectTokenFactory.sol";
+import {AirdropDistributor} from "../src/AirdropDistributor.sol";
 
 /**
  * @title Deploy
@@ -22,6 +23,7 @@ import {ProjectTokenFactory} from "../src/ProjectTokenFactory.sol";
  *   - KickoffPoolReader (view functions for Vote-Sale pools)
  *   - TokenVesting (vesting schedules)
  *   - ProjectTokenFactory (token creation with tokenomics)
+ *   - AirdropDistributor (Merkle-based airdrop distribution)
  * 
  * Usage with auto-verification:
  *   Base Mainnet:
@@ -134,10 +136,18 @@ contract Deploy is Script {
         vesting.setFactory(address(tokenFactory));
         console.log("Factory linked to TokenVesting");
 
+        // ============ Part 3: Airdrop Distribution ============
+        console.log("");
+        console.log("--- Deploying Airdrop Distribution ---");
+
+        // 3.1 AirdropDistributor (uses KickoffFactory for pool validation, ProjectTokenFactory for creator validation)
+        AirdropDistributor airdropDistributor = new AirdropDistributor(address(kickoffFactory), address(tokenFactory));
+        console.log("AirdropDistributor deployed:", address(airdropDistributor));
+
         vm.stopBroadcast();
 
         // ============ Output Results ============
-        _printDeploymentSummary(kickoffFactory, poolReader, vesting, tokenFactory, deployer);
+        _printDeploymentSummary(kickoffFactory, poolReader, vesting, tokenFactory, airdropDistributor, deployer);
     }
 
     function _printDeploymentSummary(
@@ -145,6 +155,7 @@ contract Deploy is Script {
         KickoffPoolReader poolReader,
         TokenVesting vesting,
         ProjectTokenFactory tokenFactory,
+        AirdropDistributor airdropDistributor,
         address deployer
     ) internal view {
         console.log("");
@@ -162,6 +173,9 @@ contract Deploy is Script {
         console.log("Token Factory Contracts:");
         console.log("  TokenVesting:", address(vesting));
         console.log("  ProjectTokenFactory:", address(tokenFactory));
+        console.log("");
+        console.log("Airdrop Contracts:");
+        console.log("  AirdropDistributor:", address(airdropDistributor));
         console.log("");
         console.log("Configuration (Aerodrome):");
         console.log("  VotingEscrow:", VOTING_ESCROW);
@@ -209,6 +223,9 @@ contract Deploy is Script {
         console.log("# Token Factory");
         console.log("TOKEN_VESTING=", address(vesting));
         console.log("PROJECT_TOKEN_FACTORY=", address(tokenFactory));
+        console.log("");
+        console.log("# Airdrop");
+        console.log("AIRDROP_DISTRIBUTOR=", address(airdropDistributor));
     }
 }
 
